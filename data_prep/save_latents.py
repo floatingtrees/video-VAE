@@ -3,21 +3,54 @@ import numpy as np
 import torch
 from PIL import Image
 import gc
+import json, shutil, subprocess
+import cv2
+from PIL import Image
+from typing import List
+
+import cv2
+import numpy as np
+from PIL import Image
+from typing import List
+from efficientvit.ae_model_zoo import DCAE_HF
+from torchvision import transforms
+from efficientvit.apps.utils.image import DMCrop
+import time
+
+def get_fps(path: str):
+    cap = cv2.VideoCapture(path)
+    if cap.isOpened():
+        fps = float(cap.get(cv2.CAP_PROP_FPS)) or 0.0
+        cap.release()
+        if fps > 0:
+            return fps
+
+    # Fallback to ffprobe if available
+    if shutil.which("ffprobe"):
+        try:
+            out = subprocess.check_output([
+                "ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", path
+            ])
+            data = json.loads(out)
+            for s in data.get("streams", []):
+                if s.get("codec_type") == "video":
+                    for key in ("avg_frame_rate", "r_frame_rate"):
+                        val = s.get(key)
+                        if val and val != "0/0":
+                            num, den = map(int, val.split("/"))
+                            if den != 0:
+                                return num / den
+        except Exception:
+            pass
+    return None
+
 
 def convertToImage(tensor):
     image = tensor[0, :, :, :].detach().numpy()
     image = np.clip((np.transpose(image, (1, 2, 0)) + 1) / 2, 0, 1)
     return Image.fromarray((image * 255).round().astype(np.uint8))
 
-import cv2
-import numpy as np
-from PIL import Image
-from typing import List
 
-import cv2
-import numpy as np
-from PIL import Image
-from typing import List
 
 def clear_vram():
     gc.collect()
@@ -128,10 +161,7 @@ STORAGE_PATH = "/mnt/t9/videos/videos"
 files = list_files(STORAGE_PATH)
 print(files[0])
 
-from efficientvit.ae_model_zoo import DCAE_HF
-from torchvision import transforms
-from efficientvit.apps.utils.image import DMCrop
-import time
+
 
 dc_ae = DCAE_HF.from_pretrained(f"mit-han-lab/dc-ae-f64c128-in-1.0").to(torch.bfloat16)
 device = torch.device("cuda")
@@ -145,24 +175,31 @@ transform = transforms.Compose([
 BATCH_SIZE = 64
 
 
-save_dir = "/mnt/t9/video_latents"
+save_dir = "/mnt/t9/video_latents2"
 start = time.perf_counter()
 with torch.no_grad():
     for counter, filepath in enumerate(files):
         tensor_cat_list = []
+        #fps = get_fps(f"{STORAGE_PATH}/{filepath}")
+        print(f"{STORAGE_PATH}/{filepath}")
+        break
         arr = video_to_pil_list(f"{STORAGE_PATH}/{filepath}")
+        
         hist_diff_list = hist_diff_indices_pil(arr)
         for element in arr:
             tensor_cat_list.append(transform(element).unsqueeze(0))
         out_list = []
+        print(time.perf_counter() - start, "start encoding")
         for i in range(0, len(tensor_cat_list), BATCH_SIZE):
             batch = torch.cat(tensor_cat_list[i:min(i+BATCH_SIZE, len(tensor_cat_list))], dim=0)
             encoded = dc_ae.encode(batch.to(device).to(torch.bfloat16))
             out_list.append(encoded)
         latents = torch.cat(out_list, dim=0).to("cpu")
+        print(time.perf_counter() - start, "end encoding")
         torch.save({"latents" : latents, "hist_diff_list": hist_diff_list}, f"{save_dir}/{filepath}.pt")
-        
+        print(time.perf_counter() - start, "end saving")
         #out_img = convertToImage(decoded.float())
         #out_img.save("./test2.png")
         if counter % 100 == 0:
             print(counter, time.perf_counter() - start)
+        exit()
