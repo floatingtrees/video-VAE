@@ -46,6 +46,8 @@ def write_video_ffmpeg(frames: List[Image.Image], fps: float, out_path: str,
 BATCH_SIZE = 64
 filepath = "/mnt/t9/video_latents/celebv_--Jiv5iYqT8_0.mp4.pt"
 latents = torch.load(filepath)["latents"]
+print(latents.shape)
+exit()
 dc_ae = DCAE_HF.from_pretrained(f"mit-han-lab/dc-ae-f64c128-in-1.0").to(torch.bfloat16)
 device = torch.device("cuda")
 dc_ae = dc_ae.to(device).eval()

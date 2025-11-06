@@ -212,3 +212,5 @@ __marimo__/
 err.txt
 logs.txt
 video.mp4
+data/
+*.mp4

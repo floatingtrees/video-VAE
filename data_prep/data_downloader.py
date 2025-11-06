@@ -11,10 +11,8 @@ import zipfile
 REPO_ID = "nkp37/OpenVid-1M"
 REPO_TYPE = "dataset"
 DEST_DIR = "/mnt/t9/videos"           # <- change me
-VIDEOS_OUT = os.path.join(DEST_DIR, "videos")
-TMP_DIR = os.path.join(DEST_DIR, "_tmp_openvid")
-os.makedirs(VIDEOS_OUT, exist_ok=True)
-os.makedirs(TMP_DIR, exist_ok=True)
+CACHE_DIR="/mnt/t9/tmp"
+
 
 # --- helpers ---------------------------------------------------------------
 
@@ -26,8 +24,14 @@ def natural_int(s: str) -> int:
         return int(s)
     except Exception:
         return 10**9
-
-def choose_first_zip(files: List[str]) -> str:
+    
+def choose_first_zip(files, idx) -> str:
+    path = f"OpenVid_part{idx}.zip"
+    if path not in files:
+        raise RuntimeError(f"Could not find {path} in repo files.")
+    return path
+'''
+def choose_first_zip(files: List[str], min_idx) -> str:
     """
     Return the 'base' zip name for the smallest part index present,
     e.g. 'OpenVid_part0.zip'. Works whether we have full zip or split parts.
@@ -36,7 +40,10 @@ def choose_first_zip(files: List[str]) -> str:
     for f in files:
         m = ZIP_FULL_RE.match(f)
         if m:
-            candidates.append(("full", natural_int(m.group(1)), f))
+            counter = natural_int(m.group(1))
+            if counter < min_idx:
+                continue
+            candidates.append(("full", counter, f))
             continue
         m = ZIP_PART_RE.match(f)
         if m:
@@ -48,7 +55,7 @@ def choose_first_zip(files: List[str]) -> str:
     # choose minimal index; prefer 'full' over 'split' if both exist for same index
     candidates.sort(key=lambda x: (x[1], 0 if x[0] == "full" else 1))
     return candidates[0][2]
-
+'''
 def download_or_reconstruct_zip(base_zip: str, files: List[str]) -> str:
     """
     If base_zip exists, download it. Otherwise, download all pieces matching the split pattern
@@ -56,7 +63,7 @@ def download_or_reconstruct_zip(base_zip: str, files: List[str]) -> str:
     """
     # Case A: full zip exists
     if base_zip in files:
-        return hf_hub_download(repo_id=REPO_ID, filename=base_zip, repo_type=REPO_TYPE)
+        return hf_hub_download(repo_id=REPO_ID, filename=base_zip, repo_type=REPO_TYPE, cache_dir=CACHE_DIR)
 
     # Case B: reconstruct from parts
     prefix = base_zip.replace(".zip", "")
@@ -66,7 +73,7 @@ def download_or_reconstruct_zip(base_zip: str, files: List[str]) -> str:
 
     local_parts = []
     for p in parts:
-        local_parts.append(hf_hub_download(repo_id=REPO_ID, filename=p, repo_type=REPO_TYPE))
+        local_parts.append(hf_hub_download(repo_id=REPO_ID, filename=p, repo_type=REPO_TYPE, cache_dir=CACHE_DIR))
 
     out_zip = os.path.join(TMP_DIR, base_zip)
     with open(out_zip, "wb") as out:
@@ -104,21 +111,25 @@ def extract_videos(zip_path: str, out_dir: str) -> int:
 
 api = HfApi()
 files = list_repo_files(repo_id=REPO_ID, repo_type=REPO_TYPE)
+for i in range(2, 5):
+    VIDEOS_OUT = os.path.join(DEST_DIR, f"videos{i}")
+    TMP_DIR = os.path.join(DEST_DIR, f"_tmp_openvid{i}")
+    os.makedirs(VIDEOS_OUT, exist_ok=True)
+    os.makedirs(TMP_DIR, exist_ok=True)
+    first_base_zip = choose_first_zip(files, i)  # e.g., "OpenVid_part0.zip"
+    print("Chosen first zip:", first_base_zip)
 
-first_base_zip = choose_first_zip(files)  # e.g., "OpenVid_part0.zip"
-print("Chosen first zip:", first_base_zip)
+    zip_path = download_or_reconstruct_zip(first_base_zip, files)
+    print("Zip ready at:", zip_path)
 
-zip_path = download_or_reconstruct_zip(first_base_zip, files)
-print("Zip ready at:", zip_path)
+    n = extract_videos(zip_path, VIDEOS_OUT)
+    print(f"Extracted {n} video files to: {VIDEOS_OUT}")
 
-n = extract_videos(zip_path, VIDEOS_OUT)
-print(f"Extracted {n} video files to: {VIDEOS_OUT}")
+    # Optional cleanup of reconstructed zip
+    if os.path.dirname(zip_path) == TMP_DIR:
+        try:
+            os.remove(zip_path)
+        except Exception:
+            pass
 
-# Optional cleanup of reconstructed zip
-if os.path.dirname(zip_path) == TMP_DIR:
-    try:
-        os.remove(zip_path)
-    except Exception:
-        pass
-
-print("Done.")
+    print("Done.")
