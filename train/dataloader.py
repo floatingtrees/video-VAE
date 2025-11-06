@@ -24,7 +24,7 @@ class LatentDataset(Dataset):
     def __init__(self, data_dir, augment = False):
         self.filenames = list_files(data_dir)
         self.data_dir = data_dir
-        self.augment = False
+        self.augment = augment
 
     def __len__(self):
         return len(self.filenames)
@@ -32,20 +32,25 @@ class LatentDataset(Dataset):
     def __getitem__(self, idx):
         filepath = self.filenames[idx]
         data = torch.load(os.path.join(self.data_dir, filepath))
+        latents = data["latents"]
+        seq_len = latents.shape[0]
         hist_diff_list = data["hist_diff_list"]
         if self.augment:
-            iteration_list = [0] + hist_diff_list + [len(hist_diff_list)]
+            iteration_list = [0] + hist_diff_list + [seq_len]
             for i in range(1, len(iteration_list) - 1):
+                #print(iteration_list)
                 left = iteration_list[i-1]
                 center = iteration_list[i]
                 right = iteration_list[i + 1]
-                deviation = (right - left) // 10
-                randomval = torch.randn(1) * deviation
-                hist_diff_list[i-1] = hist_diff_list[i-1] # Iteration list prepends a 0
-                
-                
-        latents = data["latents"]
-        seq_len = latents.shape[0]
+                right_deviation = (right - center) // 8
+                left_deviation = (center - left) // 8
+                randomval = torch.clamp(torch.randn(1), -2, 2).item()
+                if randomval < 0:
+                    randomval *= left_deviation
+                else:
+                    randomval *= right_deviation
+                hist_diff_list[i-1] = center + int(randomval) # Iteration list prepends a 0
+        
         split_attn_mask = generate_attn_mask(hist_diff_list, seq_len)
         return {"latents": latents, "split_attn_mask": split_attn_mask, "hist_diff_list": hist_diff_list}
       
@@ -83,8 +88,8 @@ def collate_fn(batch):
   
 if __name__ == "__main__":
     data_dir = "/mnt/t9/video_latents"
-    dataset = LatentDataset(data_dir)
-    dataloader = DataLoader(dataset, batch_size=2, shuffle=False, num_workers=1, collate_fn=collate_fn)
+    dataset = LatentDataset(data_dir, augment = True)
+    dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=1, collate_fn=collate_fn)
     maxlen = 0
     lengths = []
     for batch in dataloader:
@@ -96,8 +101,6 @@ if __name__ == "__main__":
         cutoff_answer_mask = batch["cutoff_answer_mask"]
         global_attention_mask = batch["global_attention_mask"]
 
-        print(split_attn_mask, "\n\n")
-        print("NEW\n\n ", global_attention_mask)
         exit()
     print("Max length: ", maxlen)
     from statistics import mean, stdev
