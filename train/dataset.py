@@ -20,19 +20,22 @@ def generate_attn_mask(input_list, seq_len):
     return mask
         
 def generate_decompression_mask(input_list, seq_len):
-    mask = torch.eye(seq_len)
+    mask = torch.zeros((seq_len, seq_len))
     input_list = [0] + input_list + [seq_len, ]
     for i in range(1, len(input_list)):
         start = input_list[i-1]
         end = input_list[i]
         mask[start, start:end] = 1
+        interpolation = torch.linspace(0.0, 1.0, steps=end - start) 
+        mask[end-1, start:end] = interpolation
     return mask
 
 class LatentDataset(Dataset):
-    def __init__(self, data_dir, augment = False):
+    def __init__(self, data_dir, max_len = 300, augment = False):
         self.filenames = list_files(data_dir)
         self.data_dir = data_dir
         self.augment = augment
+        self.max_len = max_len
 
     def __len__(self):
         return len(self.filenames)
@@ -40,9 +43,13 @@ class LatentDataset(Dataset):
     def __getitem__(self, idx):
         filepath = self.filenames[idx]
         data = torch.load(os.path.join(self.data_dir, filepath))
-        latents = data["latents"]
+        latents = data["latents"][:self.max_len, ...]
         seq_len = latents.shape[0]
-        hist_diff_list = data["hist_diff_list"]
+        hist_diff_list_old = data["hist_diff_list"]
+        hist_diff_list = []
+        for element in hist_diff_list_old:
+            if element < self.max_len:
+                hist_diff_list.append(element)
         mask_list = [0, seq_len - 1]
         if self.augment: # add some noise to the labels
             iteration_list = [0] + hist_diff_list + [seq_len]
@@ -86,7 +93,7 @@ def collate_fn(batch):
     global_attention_mask.fill_(float("-inf"))
     split_attn_mask.fill_(float('-inf'))
     compression_mask = torch.zeros((batch_size, max_length))
-    
+    total_parts = 0
     for i, item in enumerate(batch):
         sample_latent = item["latents"]
         sample_split_attn_mask = item["split_attn_mask"]
@@ -95,6 +102,7 @@ def collate_fn(batch):
         sample_decompression_mask = item["decompression_mask"]
         
         length = sample_latent.shape[0]
+        total_parts += length
         latent_tensor[i, :length, :, :, :] = sample_latent
         split_attn_mask[i, :length, :length] = sample_split_attn_mask
         decompression_mask[i, :length, :length] = sample_decompression_mask
@@ -109,7 +117,8 @@ def collate_fn(batch):
             compression_mask[i, element] = 1
     return {"latent_tensor": latent_tensor, "split_attn_mask": split_attn_mask, "cutoffs": cutoffs,
             "cutoff_answer_mask": cutoff_answer_mask, "global_attention_mask": global_attention_mask, 
-            "compression_mask": compression_mask, "decompression_mask": decompression_mask}
+            "compression_mask": compression_mask, "decompression_mask": decompression_mask, 
+            "total_parts": total_parts}
         
     
   
@@ -128,12 +137,14 @@ if __name__ == "__main__":
         cutoff_answer_mask = batch["cutoff_answer_mask"]
         global_attention_mask = batch["global_attention_mask"]
         compression_mask = batch["compression_mask"]
-        print(cutoffs)
-        print(compression_mask)
+        decompression_mask = batch["decompression_mask"]
+        #print(cutoffs)
+        #print(compression_mask)
         for i in range(compression_mask.shape[1]):
             if compression_mask[0, i].item() == 1:
                 split_attn_mask[0, i, 0] = 1
-        print(split_attn_mask)
+        #print(split_attn_mask)
+        print(decompression_mask)
         exit()
     print("Max length: ", maxlen)
     from statistics import mean, stdev

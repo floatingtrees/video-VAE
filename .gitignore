@@ -214,3 +214,4 @@ logs.txt
 video.mp4
 data/
 *.mp4
+train/wandb/
