@@ -19,8 +19,8 @@ def generate_attn_mask(input_list, seq_len):
         mask[start:end, start:end] = 0
     return mask
         
-def generate_decompression_mask(input_list, seq_len):
-    mask = torch.zeros((seq_len, seq_len))
+def generate_decompression_mask(input_list, seq_len, device = "cpu"):
+    mask = torch.zeros((seq_len, seq_len), device = device)
     input_list = [0] + input_list + [seq_len, ]
     for i in range(1, len(input_list)):
         start = input_list[i-1]

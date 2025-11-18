@@ -8,6 +8,7 @@ from dataset import LatentDataset, collate_fn
 from torch.utils.data import DataLoader
 from torch import Tensor
 import time
+from dataset import generate_attn_mask, generate_decompression_mask
 
 
 class MLP(nn.Module):
@@ -22,7 +23,7 @@ class MLP(nn.Module):
         return self.net(x)
 
 class Attention(nn.Module):
-    def __init__(self, dim, num_heads = 4):
+    def __init__(self, dim, num_heads = 8):
         super().__init__()
         self.to_qkv = nn.Linear(dim, dim * 3)
         self.num_heads = num_heads
@@ -143,10 +144,25 @@ class Decompressor(nn.Module):
             x = x + mlp(x)
         return x
         
+def sample_gaussian_sums(x):
+    return_list = []
+    i = 0
+    accum = 0
+    start_idx = 0
+    for j in range(x.shape[1]):
+        accum += x[i, j]
+        if accum >= 1.0:
+            view_arr = x[i, start_idx:j+1] / accum
+            sampled_val = torch.multinomial(view_arr, 1)
+            return_list.append(sampled_val.item() + start_idx)
+            start_idx = j + 1
+            accum = 0
+            
+    return return_list
 
 # LATENTS IN SHAPE OF (128, 8, 8)
 class VideoEncoder(nn.Module):
-    def __init__(self, channels, height, width, temporal_dim = 256, inner_dim=128, depth=3): # Inputs in shape of (batch, num_frames, channels, height, width)
+    def __init__(self, channels, height, width, temporal_dim, inner_dim=128, depth=3): # Inputs in shape of (batch, num_frames, channels, height, width)
         super(VideoEncoder, self).__init__()
         # This is the PE for the image patches, so it can be constant
         self.image_PE = nn.Parameter(torch.zeros(height * width, channels))
@@ -155,8 +171,44 @@ class VideoEncoder(nn.Module):
         self.compressor = Compressor(channels, height, width, temporal_dim=temporal_dim, depth=depth)
         self.decompressor = Decompressor(channels, height, width, temporal_dim=temporal_dim, depth=depth)
         
-    def encode(x, masks, cutoffs):
-        pass
+    def encode(self, x, global_attention_mask):
+        b, s, c, h, w = x.shape
+        assert b == 1, "Batch size must be 1 for encoding."
+        x = rearrange(x, 'b s c h w -> b s (h w) c')
+        x = x + self.image_PE  # Add positional encoding
+        attn_scores, chunks = self.chunker(x, global_attention_mask)
+        chunk_probs = torch.sigmoid(chunks)
+        cutoffs_list = sample_gaussian_sums(chunk_probs.squeeze(-1))
+        split_attn_mask = generate_attn_mask(cutoffs_list, s).unsqueeze(0).to(device=x.device)
+        compressed = self.compressor(x, split_attn_mask)
+        read_in_list = [0]
+        
+        for element in cutoffs_list:
+            read_in_list.append(element - 1)
+            read_in_list.append(element)
+        read_in_list.append(s - 1)
+        x = compressed[:, read_in_list, :, :]
+        x = rearrange(x, 'b s (h w) c -> b s c h w', h = h, w = w)
+        return x, cutoffs_list
+    
+    def decode(self, x, read_in_list, cutoffs_list):
+        b, _, c, h, w = x.shape 
+        s = read_in_list[-1]
+        split_attn_mask = generate_attn_mask(cutoffs_list, s).unsqueeze(0).to(device=x.device)
+        decompressed_array = torch.zeros((b, s, c, h, w), device=x.device, dtype=x.dtype)
+        decompressed_array[:, read_in_list, :, :, :] = x
+        decompression_mask = generate_decompression_mask(cutoffs_list, s, device=x.device).unsqueeze(0)
+        decompressed = rearrange(decompressed_array, "b s (h w) c -> (h w) b c s", h = h, w = w)
+        decompressed = torch.matmul(decompressed, decompression_mask)
+        decompressed = rearrange(decompressed, "(h w) b c s -> b s (h w) c", h = h, w=w)
+        embedding_tensor = sinusoidal_positions(s, c * h * w, device = decompressed.device)
+        embedding_tensor = rearrange(embedding_tensor, "s (c h w) -> s (h w) c", h=h, c=c, w=w)
+        decompressed = decompressed + embedding_tensor
+        reconstruction = self.decompressor(decompressed, split_attn_mask)
+        reconstruction = rearrange(reconstruction, 'b s (h w) c -> b s c h w', h = h, w = w)
+        return reconstruction
+        
+
     
     def forward(self, latents: Tensor, split_attn_mask: Tensor, 
                 global_attention_mask: Tensor, compression_mask: Tensor, decompression_mask: Tensor
@@ -200,7 +252,7 @@ class VideoEncoder(nn.Module):
         
 if __name__ == "__main__":
     device = "cuda"
-    model = VideoEncoder(channels=128, height=8, width=8)
+    model = VideoEncoder(channels=128, height=8, width=8, temporal_dim=64)
     model.to(device)
     total_params = 0
     for element in model.parameters():
@@ -225,8 +277,9 @@ if __name__ == "__main__":
         global_attention_mask = batch["global_attention_mask"].to(device) # Mask to strip padding
         compression_mask = batch["compression_mask"].to(device) # Mask out all but the first and last frames of each chunk
         decompression_mask = batch["decompression_mask"].to(device) # Mask that moves the first frame accross chunks
+        a, b, c = model.encode(latent_tensor[0:1], global_attention_mask[0:1])
+        print(model.decode(a, b, c).shape)
+        exit()
         reconstruction, chunks = model.forward(latent_tensor, split_attn_mask, global_attention_mask, compression_mask, decompression_mask)
-        print(chunks.shape, cutoffs.shape)
-        print(chunks.squeeze() * cutoffs)
         
         exit()

@@ -158,9 +158,7 @@ def list_files(path):
     return [f for f in os.listdir(path) if os.path.isfile(os.path.join(path, f))]
 
 # Example
-STORAGE_PATH = "/mnt/t9/videos/videos2"
-files = list_files(STORAGE_PATH)
-print(files[0])
+
 
 
 
@@ -174,33 +172,38 @@ transform = transforms.Compose([
 ])
 
 BATCH_SIZE = 64
+for i in range(4, 10):
+    STORAGE_PATH = f"/mnt/t9/videos/videos{i}"
+    files = list_files(STORAGE_PATH)
+    save_dir = "/mnt/t9/video_latents"
+    print(files[0])
+    start = time.perf_counter()
+    with torch.no_grad():
+        for counter, filepath in enumerate(files):
+            try:
+                tensor_cat_list = []
+                #fps = get_fps(f"{STORAGE_PATH}/{filepath}")
 
-
-save_dir = "/mnt/t9/video_latents"
-start = time.perf_counter()
-with torch.no_grad():
-    for counter, filepath in enumerate(files):
-        try:
-            tensor_cat_list = []
-            #fps = get_fps(f"{STORAGE_PATH}/{filepath}")
-
-            arr = video_to_pil_list(f"{STORAGE_PATH}/{filepath}")
-            
-            hist_diff_list = hist_diff_indices_pil(arr)
-            for element in arr:
-                tensor_cat_list.append(transform(element).unsqueeze(0))
-            out_list = []
-            for i in range(0, len(tensor_cat_list), BATCH_SIZE):
-                batch = torch.cat(tensor_cat_list[i:min(i+BATCH_SIZE, len(tensor_cat_list))], dim=0)
-                encoded = dc_ae.encode(batch.to(device).to(torch.bfloat16))
-                out_list.append(encoded)
-            latents = torch.cat(out_list, dim=0).to("cpu")
-            torch.save({"latents" : latents, "hist_diff_list": hist_diff_list}, f"{save_dir}/{filepath}.pt")
-            #out_img = convertToImage(decoded.float())
-            #out_img.save("./test2.png")
-            if counter % 100 == 0:
-                print(counter, time.perf_counter() - start)
-            sys.stdout.flush()
-        except Exception as e:
-            print(e)
-print("DONE PROCESSING")
+                arr = video_to_pil_list(f"{STORAGE_PATH}/{filepath}")
+                
+                hist_diff_list = hist_diff_indices_pil(arr)
+                for element in arr:
+                    tensor_cat_list.append(transform(element).unsqueeze(0))
+                out_list = []
+                if len(tensor_cat_list) > 2000:
+                    continue
+                for i in range(0, len(tensor_cat_list), BATCH_SIZE):
+                    batch = torch.cat(tensor_cat_list[i:min(i+BATCH_SIZE, len(tensor_cat_list))], dim=0)
+                    encoded = dc_ae.encode(batch.to(device).to(torch.bfloat16))
+                    out_list.append(encoded)
+                latents = torch.cat(out_list, dim=0).to("cpu")
+                torch.save({"latents" : latents, "hist_diff_list": hist_diff_list}, f"{save_dir}/{filepath}.pt")
+                #out_img = convertToImage(decoded.float())
+                #out_img.save("./test2.png")
+                if counter % 100 == 0:
+                    print(counter, time.perf_counter() - start)
+                    sys.stdout.flush()
+            except Exception as e:
+                print(e)
+    sys.stdout.flush()
+    print("DONE PROCESSING")

@@ -111,7 +111,7 @@ def extract_videos(zip_path: str, out_dir: str) -> int:
 
 api = HfApi()
 files = list_repo_files(repo_id=REPO_ID, repo_type=REPO_TYPE)
-for i in range(2, 5):
+for i in range(11, 15):
     VIDEOS_OUT = os.path.join(DEST_DIR, f"videos{i}")
     TMP_DIR = os.path.join(DEST_DIR, f"_tmp_openvid{i}")
     os.makedirs(VIDEOS_OUT, exist_ok=True)
