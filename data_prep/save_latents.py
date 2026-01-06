@@ -171,16 +171,21 @@ transform = transforms.Compose([
     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
 ])
 
-BATCH_SIZE = 64
-for i in range(4, 10):
+BATCH_SIZE = 100
+for i in range(14, 20):
     STORAGE_PATH = f"/mnt/t9/videos/videos{i}"
     files = list_files(STORAGE_PATH)
+    
     save_dir = "/mnt/t9/video_latents"
+    files2 = set(list_files(save_dir))
     print(files[0])
     start = time.perf_counter()
     with torch.no_grad():
         for counter, filepath in enumerate(files):
             try:
+                if f"{save_dir}/{filepath}.pt" in files2:
+                    print("Skipping", filepath)
+                    continue
                 tensor_cat_list = []
                 #fps = get_fps(f"{STORAGE_PATH}/{filepath}")
 
@@ -191,6 +196,7 @@ for i in range(4, 10):
                     tensor_cat_list.append(transform(element).unsqueeze(0))
                 out_list = []
                 if len(tensor_cat_list) > 2000:
+                    print("Skipping")
                     continue
                 for i in range(0, len(tensor_cat_list), BATCH_SIZE):
                     batch = torch.cat(tensor_cat_list[i:min(i+BATCH_SIZE, len(tensor_cat_list))], dim=0)
@@ -198,6 +204,7 @@ for i in range(4, 10):
                     out_list.append(encoded)
                 latents = torch.cat(out_list, dim=0).to("cpu")
                 torch.save({"latents" : latents, "hist_diff_list": hist_diff_list}, f"{save_dir}/{filepath}.pt")
+                
                 #out_img = convertToImage(decoded.float())
                 #out_img.save("./test2.png")
                 if counter % 100 == 0:

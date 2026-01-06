@@ -44,23 +44,24 @@ def write_video_ffmpeg(frames: List[Image.Image], fps: float, out_path: str,
             raise RuntimeError("ffmpeg failed.")
 
 BATCH_SIZE = 64
-filepath = "/mnt/t9/video_latents/celebv_--Jiv5iYqT8_0.mp4.pt"
-latents = torch.load(filepath)["latents"]
-print(latents.shape)
-exit()
-dc_ae = DCAE_HF.from_pretrained(f"mit-han-lab/dc-ae-f64c128-in-1.0").to(torch.bfloat16)
-device = torch.device("cuda")
-dc_ae = dc_ae.to(device).eval()
-video_len = latents.shape[0]
-out_list = []
-with torch.no_grad():
-    for i in range(0, video_len, BATCH_SIZE):
-        batch = latents[i:min(i+BATCH_SIZE, video_len)]
-        encoded = dc_ae.decode(batch.to(device).to(torch.bfloat16))
-        out_list.append(encoded)
-reconstructed = torch.cat(out_list, dim=0).to("cpu")
-frame_list = []
-for i in range(video_len):
-    frame = convertToImage(reconstructed[i:i+1])
-    frame_list.append(frame)
-write_video_ffmpeg(frame_list, fps=24, out_path="./test2.mp4")
+filepath = "/mnt/t9/video_autoencoder_generations/latent_epoch_10.pt"
+for reconstruct_or_original in ["reconstruction", "original"]:
+    latents = torch.load(filepath)[reconstruct_or_original][0]
+    print(latents.shape)
+
+    dc_ae = DCAE_HF.from_pretrained(f"mit-han-lab/dc-ae-f64c128-in-1.0").to(torch.bfloat16)
+    device = torch.device("cuda")
+    dc_ae = dc_ae.to(device).eval()
+    video_len = latents.shape[0]
+    out_list = []
+    with torch.no_grad():
+        for i in range(0, video_len, BATCH_SIZE):
+            batch = latents[i:min(i+BATCH_SIZE, video_len)]
+            encoded = dc_ae.decode(batch.to(device).to(torch.bfloat16))
+            out_list.append(encoded)
+    reconstructed = torch.cat(out_list, dim=0).to("cpu")
+    frame_list = []
+    for i in range(video_len):
+        frame = convertToImage(reconstructed[i:i+1])
+        frame_list.append(frame)
+    write_video_ffmpeg(frame_list, fps=24, out_path=f"./test2_{reconstruct_or_original}.mp4")
