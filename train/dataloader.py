@@ -29,10 +29,31 @@ def list_video_files(base_dir: str = "/mnt/t9/videos") -> List[str]:
     return video_paths
 
 
+def center_crop(frame: np.ndarray, crop_size: int = 512) -> np.ndarray:
+    """
+    Center crop a frame to a square of crop_size x crop_size.
+    If the frame is smaller than crop_size, it will be resized up first.
+    """
+    h, w = frame.shape[:2]
+    
+    # If frame is smaller than crop_size, resize up maintaining aspect ratio
+    if h < crop_size or w < crop_size:
+        scale = max(crop_size / h, crop_size / w)
+        new_h, new_w = int(h * scale), int(w * scale)
+        frame = cv2.resize(frame, (new_w, new_h))
+        h, w = new_h, new_w
+    
+    # Center crop
+    start_h = (h - crop_size) // 2
+    start_w = (w - crop_size) // 2
+    return frame[start_h:start_h + crop_size, start_w:start_w + crop_size]
+
+
 def load_video(
     path: str, 
     max_frames: Optional[int] = None, 
-    resize: Optional[Tuple[int, int]] = None
+    resize: Optional[Tuple[int, int]] = None,
+    crop_size: int = 512
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Load a video file and return as numpy array with padding mask.
@@ -41,7 +62,8 @@ def load_video(
         path: Path to the video file
         max_frames: Maximum number of frames to load (None for all). 
                     If video is shorter, it will be padded with zeros.
-        resize: Optional (H, W) to resize frames
+        resize: Optional (H, W) to resize frames after center cropping
+        crop_size: Size of the center crop (default 512x512)
     
     Returns:
         Tuple of:
@@ -66,6 +88,9 @@ def load_video(
         
         # Convert BGR to RGB
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        
+        # Center crop to 512x512
+        frame = center_crop(frame, crop_size)
         
         # Resize if specified
         if resize is not None:
@@ -125,13 +150,14 @@ class LoadVideoTransform(grain.MapTransform):
     Returns a dict with 'video' and 'mask' keys.
     """
     
-    def __init__(self, max_frames: Optional[int] = None, resize: Optional[Tuple[int, int]] = None):
+    def __init__(self, max_frames: Optional[int] = None, resize: Optional[Tuple[int, int]] = None, crop_size: int = 512):
         self.max_frames = max_frames
         self.resize = resize
+        self.crop_size = crop_size
     
     def map(self, path: str) -> Dict[str, np.ndarray]:
         """Load video from path and return as dict with video and mask."""
-        video, mask = load_video(path, self.max_frames, self.resize)
+        video, mask = load_video(path, self.max_frames, self.resize, self.crop_size)
         return {"video": video, "mask": mask}
 
 
@@ -303,7 +329,7 @@ if __name__ == "__main__":
     print("\nTesting batched Grain dataloader...")
     batched_dataloader = create_batched_dataloader(
         batch_size=4,
-        max_frames=32,
+        max_frames=1024,
         resize=(256, 256),
         shuffle=True,
         num_workers=4,
@@ -320,4 +346,7 @@ if __name__ == "__main__":
               f"real_frames_per_video={real_frames_per_video.tolist()}, "
               f"min={video.min():.3f}, max={video.max():.3f}")
         if i >= 2:
+            import time 
+            print("DONE")
+            time.sleep(1000)
             break
