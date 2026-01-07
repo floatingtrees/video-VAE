@@ -60,7 +60,7 @@ class SinusoidalPositionalEncoding(nnx.Module):
 class Attention(nnx.Module):
     def __init__(self, in_features, inner_dim, num_heads, qkv_features, max_len, rngs: nnx.Rngs):
         super().__init__()
-        self.MHA = nnx.MultiheadAttention(num_heads = num_heads, 
+        self.MHA = nnx.MultiHeadAttention(num_heads = num_heads, 
             in_features = in_features, qkv_features = qkv_features, 
             rngs = rngs, decode = False)
         self.PE = SinusoidalPositionalEncoding(max_len = max_len, embed_dim = in_features)
@@ -70,25 +70,48 @@ class Attention(nnx.Module):
         attn_output = self.MHA(x)
         return attn_output
 
-class FactoredAttention(nnx.Module):
-    def __init__(self, in_features, inner_dim, num_heads, qkv_features, max_temporal_len, max_spatial_len, rngs: nnx.Rngs):
+class MLP(nnx.Module):
+    def __init__(self, in_features, mlp_dim, rngs: nnx.Rngs):
         super().__init__()
-        self.SpatialAttention = Attention(in_features, inner_dim, num_heads, qkv_features, max_spatial_len, rngs)
-        self.TemporalAttention = Attention(in_features, inner_dim, num_heads, qkv_features, max_temporal_len, rngs)
+        self.norm = nnx.LayerNorm(in_features, rngs = rngs)
+        self.linear1 = nnx.Linear(in_features, mlp_dim, rngs = rngs)
+        
+        self.linear2 = nnx.Linear(mlp_dim, in_features, rngs = rngs)
         
     def __call__(self, x: Float[Array, "b time hw channels"]):
+        x = self.norm(x)
+        x = self.linear1(x)
+        x = nnx.silu(x)
+        x = self.linear2(x)
+        return x
+
+class FactoredAttention(nnx.Module):
+    def __init__(self, mlp_dim, in_features, inner_dim, num_heads, qkv_features, max_temporal_len, max_spatial_len, rngs: nnx.Rngs):
+        super().__init__()
+        self.SpatialAttention = Attention(in_features, inner_dim, num_heads, qkv_features, max_spatial_len, rngs)
+        self.SpatialMLP = MLP(in_features, mlp_dim, rngs)
+        self.TemporalAttention = Attention(in_features, inner_dim, num_heads, qkv_features, max_temporal_len, rngs)
+        self.TemporalMLP = MLP(in_features, mlp_dim, rngs)
+
+    def __call__(self, x: Float[Array, "b time hw channels"]):
+        print(x.shape)
         b, t, hw, c = x.shape
         temporal_x = rearrange(x, "b t hw c -> (b hw) t c")
         temporal_attn_output = self.TemporalAttention(temporal_x)
         temporal_x = temporal_x + temporal_attn_output
+        temporal_x = temporal_x + self.TemporalMLP(temporal_x)
+
         original_shape_x = rearrange(temporal_x, "(b hw) t c -> b t hw c", b = b, hw = hw)
+
         spatial_x = rearrange(original_shape_x, "b t hw c -> (b t) hw c")
         spatial_attn_output = self.SpatialAttention(spatial_x)
         spatial_x = spatial_x + spatial_attn_output
+        spatial_x = spatial_x + self.SpatialMLP(spatial_x)
+        
         original_shape_x = rearrange(spatial_x, "(b t) hw c -> b t hw c", b = b, t = t)
         return original_shape_x
 
-        
+
 @jax.custom_vjp
 def gumbel_softmax_ste(
     logits: Array,
