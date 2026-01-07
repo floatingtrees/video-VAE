@@ -14,7 +14,6 @@ class Encoder(nnx.Module):
         super().__init__()
         self.patch_embedding = PatchEmbedding(height, width, channels, patch_size, rngs)
 
-    @jaxtyped(typechecker=beartype)
     def __call__(self, x: Float[Array, "b time height width channels"]):
         return self.patch_embedding(x)
 
