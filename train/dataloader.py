@@ -2,9 +2,94 @@ import os
 import jax
 import jax.numpy as jnp
 import numpy as np
-from typing import Optional, List, Tuple, Dict
+from typing import Optional, List, Tuple, Dict, Union
 import cv2
 import grain.python as grain
+
+
+def batch_to_video(
+    batch: Dict[str, Union[np.ndarray, jnp.ndarray]],
+    output_path: str,
+    fps: float = 30.0,
+    use_mask: bool = True,
+    sample_idx: int = 0,
+    crf: int = 18,
+    preset: str = "medium",
+) -> None:
+    """
+    Extract the first (or specified) sample from a batch and save it as a video file.
+    
+    Args:
+        batch: Dict with 'video' and 'mask' keys from the dataloader.
+               'video' shape: (T, H, W, C) or (B, T, H, W, C)
+               'mask' shape: (T,) or (B, T)
+        output_path: Path to save the output video (e.g., 'output.mp4')
+        fps: Frames per second for the output video
+        use_mask: If True, only include real frames (mask=1), excluding padded frames
+        sample_idx: Index of the sample to extract from batch (default 0)
+        crf: Constant rate factor for H.264 encoding (lower = better quality)
+        preset: ffmpeg encoding preset (ultrafast, fast, medium, slow, etc.)
+    """
+    import subprocess
+    import shutil
+    
+    if not shutil.which("ffmpeg"):
+        raise RuntimeError("ffmpeg not found on PATH.")
+    
+    video = batch["video"]
+    mask = batch["mask"]
+    
+    # Convert JAX arrays to numpy
+    if hasattr(video, "device"):
+        video = np.array(video)
+    if hasattr(mask, "device"):
+        mask = np.array(mask)
+    
+    # Handle batched vs unbatched
+    if video.ndim == 5:  # (B, T, H, W, C)
+        video = video[sample_idx]
+        mask = mask[sample_idx]
+    
+    # Convert from [0, 1] to [0, 255]
+    video = (video * 255).astype(np.uint8)
+    
+    # Filter out padded frames if use_mask is True
+    if use_mask:
+        real_frames = mask > 0.5
+        video = video[real_frames]
+    
+    if len(video) == 0:
+        raise ValueError("No frames to write (all frames are padded)")
+    
+    # Get video dimensions
+    t, h, w, c = video.shape
+    
+    # Pipe raw frames directly to ffmpeg
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "rawvideo",
+        "-pix_fmt", "rgb24",
+        "-s", f"{w}x{h}",
+        "-r", str(fps),
+        "-i", "pipe:0",
+        "-vcodec", "libx264",
+        "-pix_fmt", "yuv420p",
+        "-crf", str(crf),
+        "-preset", preset,
+        output_path
+    ]
+    
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    try:
+        for frame in video:
+            proc.stdin.write(frame.tobytes())
+    finally:
+        proc.stdin.close()
+        proc.wait()
+        if proc.returncode != 0:
+            raise RuntimeError("ffmpeg failed.")
+    
+    print(f"Saved video to {output_path} ({len(video)} frames, {w}x{h}, {fps} fps)")
 
 
 def list_video_files(base_dir: str = "/mnt/t9/videos") -> List[str]:
@@ -29,23 +114,35 @@ def list_video_files(base_dir: str = "/mnt/t9/videos") -> List[str]:
     return video_paths
 
 
-def center_crop(frame: np.ndarray, crop_size: int = 512) -> np.ndarray:
+def get_random_crop_params(h: int, w: int, crop_size: int) -> Tuple[int, int, int, int]:
     """
-    Center crop a frame to a square of crop_size x crop_size.
-    If the frame is smaller than crop_size, it will be resized up first.
+    Get random crop parameters. Returns (new_h, new_w, start_h, start_w).
+    If the frame is smaller than crop_size, computes resize dimensions first.
     """
-    h, w = frame.shape[:2]
-    
-    # If frame is smaller than crop_size, resize up maintaining aspect ratio
+    # If frame is smaller than crop_size, compute resize dimensions
     if h < crop_size or w < crop_size:
         scale = max(crop_size / h, crop_size / w)
-        new_h, new_w = int(h * scale), int(w * scale)
-        frame = cv2.resize(frame, (new_w, new_h))
-        h, w = new_h, new_w
+        h, w = int(h * scale), int(w * scale)
     
-    # Center crop
-    start_h = (h - crop_size) // 2
-    start_w = (w - crop_size) // 2
+    # Random crop position
+    start_h = np.random.randint(0, h - crop_size + 1)
+    start_w = np.random.randint(0, w - crop_size + 1)
+    
+    return h, w, start_h, start_w
+
+
+def apply_crop(frame: np.ndarray, crop_size: int, crop_params: Tuple[int, int, int, int]) -> np.ndarray:
+    """
+    Apply crop to a frame using pre-computed crop parameters.
+    """
+    target_h, target_w, start_h, start_w = crop_params
+    h, w = frame.shape[:2]
+    
+    # Resize if needed
+    if h != target_h or w != target_w:
+        frame = cv2.resize(frame, (target_w, target_h))
+    
+    # Apply crop
     return frame[start_h:start_h + crop_size, start_w:start_w + crop_size]
 
 
@@ -62,8 +159,8 @@ def load_video(
         path: Path to the video file
         max_frames: Maximum number of frames to load (None for all). 
                     If video is shorter, it will be padded with zeros.
-        resize: Optional (H, W) to resize frames after center cropping
-        crop_size: Size of the center crop (default 512x512)
+        resize: Optional (H, W) to resize frames after random cropping
+        crop_size: Size of the random crop (default 512x512)
     
     Returns:
         Tuple of:
@@ -77,6 +174,7 @@ def load_video(
     
     frames = []
     frame_count = 0
+    crop_params = None  # Will be set on first frame
     
     while True:
         if max_frames is not None and frame_count >= max_frames:
@@ -89,8 +187,13 @@ def load_video(
         # Convert BGR to RGB
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         
-        # Center crop to 512x512
-        frame = center_crop(frame, crop_size)
+        # Compute random crop params on first frame (same crop for all frames)
+        if crop_params is None:
+            h, w = frame.shape[:2]
+            crop_params = get_random_crop_params(h, w, crop_size)
+        
+        # Apply random crop (same position for all frames)
+        frame = apply_crop(frame, crop_size, crop_params)
         
         # Resize if specified
         if resize is not None:
@@ -182,6 +285,7 @@ def create_dataloader(
     batch_size: int = 1,
     max_frames: Optional[int] = None,
     resize: Optional[Tuple[int, int]] = None,
+    crop_size: int = 512,
     shuffle: bool = True,
     seed: int = 42,
     num_workers: int = 4,
@@ -195,7 +299,8 @@ def create_dataloader(
         batch_size: Number of videos per batch
         max_frames: Maximum frames to load per video. Videos shorter than this
                     will be padded with zeros.
-        resize: Optional (H, W) to resize videos
+        resize: Optional (H, W) to resize videos after center cropping
+        crop_size: Size of center crop before resize (default 512)
         shuffle: Whether to shuffle the dataset
         seed: Random seed for shuffling
         num_workers: Number of worker processes for data loading
@@ -226,7 +331,7 @@ def create_dataloader(
     
     # Define transformations
     transformations = [
-        LoadVideoTransform(max_frames=max_frames, resize=resize),
+        LoadVideoTransform(max_frames=max_frames, resize=resize, crop_size=crop_size),
     ]
     
     # Create dataloader
@@ -246,6 +351,7 @@ def create_batched_dataloader(
     batch_size: int = 1,
     max_frames: Optional[int] = None,
     resize: Optional[Tuple[int, int]] = None,
+    crop_size: int = 512,
     shuffle: bool = True,
     seed: int = 42,
     num_workers: int = 4,
@@ -260,7 +366,8 @@ def create_batched_dataloader(
         batch_size: Number of videos per batch
         max_frames: Maximum frames to load per video (required for batching).
                     Videos shorter than this will be padded with zeros.
-        resize: Optional (H, W) to resize videos (required for batching)
+        resize: Optional (H, W) to resize videos after center cropping (required for batching)
+        crop_size: Size of center crop before resize (default 512)
         shuffle: Whether to shuffle the dataset
         seed: Random seed for shuffling
         num_workers: Number of worker processes for data loading
@@ -285,7 +392,7 @@ def create_batched_dataloader(
     
     # Define transformations
     transformations = [
-        LoadVideoTransform(max_frames=max_frames, resize=resize),
+        LoadVideoTransform(max_frames=max_frames, resize=resize, crop_size=crop_size),
         grain.Batch(batch_size=batch_size, drop_remainder=drop_remainder),
     ]
     
@@ -302,6 +409,10 @@ def create_batched_dataloader(
 
 
 if __name__ == "__main__":
+    # Create output directory
+    output_dir = os.path.join(os.path.dirname(__file__), "outputs")
+    os.makedirs(output_dir, exist_ok=True)
+    
     # Example usage with Grain dataloader
     dataloader = create_dataloader(
         batch_size=1,
@@ -323,6 +434,11 @@ if __name__ == "__main__":
         print(f"Batch {i}: video shape={video.shape}, mask shape={mask.shape}, "
               f"real_frames={num_real}/{video.shape[0]}, "
               f"min={video.min():.3f}, max={video.max():.3f}")
+        
+        # Save first batch as video
+        if i == 1:
+            batch_to_video(batch, os.path.join(output_dir, "sample_unbatched.mp4"), fps=30.0)
+        
         if i >= 2:
             break
     
@@ -345,8 +461,13 @@ if __name__ == "__main__":
         print(f"Batch {i}: video shape={video.shape}, mask shape={mask.shape}, "
               f"real_frames_per_video={real_frames_per_video.tolist()}, "
               f"min={video.min():.3f}, max={video.max():.3f}")
+        
+        # Save first sample from first batch as video
+        if i == 1:
+            batch_to_video(batch, os.path.join(output_dir, "sample_batched.mp4"), fps=30.0, sample_idx=0)
+        
         if i >= 2:
-            import time 
-            print("DONE")
-            time.sleep(1000)
             break
+    print("DONE")
+    import time 
+    time.sleep(1000)
