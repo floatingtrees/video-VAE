@@ -93,10 +93,9 @@ class FactoredAttention(nnx.Module):
         self.TemporalAttention = Attention(in_features, num_heads, qkv_features, max_temporal_len, rngs)
         self.TemporalMLP = MLP(in_features, mlp_dim, rngs)
 
-    def __call__(self, x: Float[Array, "b time hw channels"], mask: Float[Array, "b 1 1 time"]):
+    def __call__(self, x: Float[Array, "b time hw channels"], temporal_mask: Float[Array, "b 1 1 time"]):
         b, t, hw, c = x.shape
-        temporal_mask = repeat(mask, "b 1 1 time -> b hw 1 1 time", hw = hw)
-        temporal_mask = rearrange(temporal_mask, "b hw 1 1 time -> (b hw) 1 1 time")
+        
         temporal_x = rearrange(x, "b t hw c -> (b hw) t c")
         temporal_attn_output = self.TemporalAttention(temporal_x, mask = temporal_mask)
         temporal_x = temporal_x + temporal_attn_output
