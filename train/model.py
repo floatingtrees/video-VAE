@@ -1,10 +1,11 @@
 from quopri import encodestring
 import jax
+#jax.config.update("jax_numpy_rank_promotion", "warn")
 import jax.numpy as jnp
 from flax import nnx
 from beartype import beartype
 from jaxtyping import jaxtyped, Float, Array
-from layers import PatchEmbedding, GumbelSoftmaxSTE, FactoredAttention
+from layers import PatchEmbedding, FactoredAttention
 
 
 
@@ -23,22 +24,21 @@ class Encoder(nnx.Module):
         max_spatial_len = height // patch_size * width // patch_size
         for _ in range(depth):
             self.layers.append(FactoredAttention(mlp_dim = mlp_dim, 
-            in_features = self.last_dim,
-            num_heads = num_heads,
-            qkv_features = qkv_features,
-            max_temporal_len = max_temporal_len,
-            max_spatial_len = max_spatial_len,
-            rngs = rngs
+                in_features = self.last_dim,
+                num_heads = num_heads,
+                qkv_features = qkv_features,
+                max_temporal_len = max_temporal_len,
+                max_spatial_len = max_spatial_len,
+                rngs = rngs
             ))
 
 
-    def __call__(self, x: Float[Array, "b time height width channels"]):
+    def __call__(self, x: Float[Array, "b time height width channels"], mask: Float[Array, "b 1 1 time"]):
         x = self.patch_embedding(x)
         for layer in self.layers:
-            x = layer(x)
+            x = layer(x, mask)
         x = self.spatial_compression(x)
         return x
-
 
 
 
@@ -52,10 +52,9 @@ if __name__ == "__main__":
     try:
         gpu_device = jax.devices('gpu')[0] # 'cuda' works too, but 'gpu' is the generic backend name
     except RuntimeError:
-        print("No GPU found! Is JAX installed with CUDA support?")
-        gpu_device = jax.devices('cpu')[0]
-    temporal_length = 1024
-    input_image = jax.random.normal(key, (5, temporal_length, 256, 256, 3)) * 0.02
+        raise RuntimeError("No GPU found! Is JAX installed with CUDA support?")
+    temporal_length = 128
+    input_image = jax.random.normal(key, (10, temporal_length, 256, 256, 3)) * 0.02
     encoder = Encoder(height=256, width=256, channels=3, patch_size=16, 
     depth=6, mlp_dim=512, num_heads=8, qkv_features=128,
     max_temporal_len=temporal_length, spatial_compression_rate=4, rngs = nnx.Rngs(0))

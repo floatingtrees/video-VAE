@@ -3,7 +3,7 @@ import jax.numpy as jnp
 from flax import nnx
 from beartype import beartype
 from jaxtyping import jaxtyped, Float, Array
-from einops import rearrange
+from einops import rearrange, repeat
 
 class PatchEmbedding(nnx.Module):
     def __init__(self, height, width, channels, patch_size, rngs: nnx.Rngs):
@@ -65,9 +65,9 @@ class Attention(nnx.Module):
             rngs = rngs, decode = False)
         self.PE = SinusoidalPositionalEncoding(max_len = max_len, embed_dim = in_features)
         
-    def __call__(self, x: Float[Array, "a seq dim"]):
+    def __call__(self, x: Float[Array, "a seq dim"], mask: Float[Array, "b 1 1 time"] = None):
         x = self.PE(x)
-        attn_output = self.MHA(x)
+        attn_output = self.MHA(x, mask = mask)
         return attn_output
 
 class MLP(nnx.Module):
@@ -93,135 +93,47 @@ class FactoredAttention(nnx.Module):
         self.TemporalAttention = Attention(in_features, num_heads, qkv_features, max_temporal_len, rngs)
         self.TemporalMLP = MLP(in_features, mlp_dim, rngs)
 
-    def __call__(self, x: Float[Array, "b time hw channels"]):
+    def __call__(self, x: Float[Array, "b time hw channels"], mask: Float[Array, "b 1 1 time"]):
         b, t, hw, c = x.shape
+        temporal_mask = repeat(mask, "b 1 1 time -> b hw 1 1 time", hw = hw)
+        temporal_mask = rearrange(temporal_mask, "b hw 1 1 time -> (b hw) 1 1 time")
         temporal_x = rearrange(x, "b t hw c -> (b hw) t c")
-        temporal_attn_output = self.TemporalAttention(temporal_x)
+        temporal_attn_output = self.TemporalAttention(temporal_x, mask = temporal_mask)
         temporal_x = temporal_x + temporal_attn_output
         temporal_x = temporal_x + self.TemporalMLP(temporal_x)
 
         original_shape_x = rearrange(temporal_x, "(b hw) t c -> b t hw c", b = b, hw = hw)
 
         spatial_x = rearrange(original_shape_x, "b t hw c -> (b t) hw c")
-        spatial_attn_output = self.SpatialAttention(spatial_x)
+        spatial_attn_output = self.SpatialAttention(spatial_x) # Only need mask to remove temporal frames
         spatial_x = spatial_x + spatial_attn_output
         spatial_x = spatial_x + self.SpatialMLP(spatial_x)
         
         original_shape_x = rearrange(spatial_x, "(b t) hw c -> b t hw c", b = b, t = t)
         return original_shape_x
 
+@jax.custom_vjp 
+def round_ste(logits: Array) -> Array:
+    return jnp.round(logits)
 
-@jax.custom_vjp
-def gumbel_softmax_ste(
-    logits: Array,
-    temperature: float,
-    gumbel_noise: Array,
-) -> Array:
-    """
-    Forward pass: Compute soft probabilities, then discretize (Hard).
-    """
-    # 1. Compute Softmax (Continuous)
-    # shape: (..., num_classes)
-    y_soft = jax.nn.softmax((logits + gumbel_noise) / temperature)
+def round_ste_fwd(logits):
+    return jnp.round(logits), ()
 
-    # 2. Compute Hard Sample (Discrete)
-    # We use argmax + one_hot to get the discrete output
-    k = y_soft.shape[-1]
-    y_hard_indices = jnp.argmax(y_soft, axis=-1)
-    y_hard = jax.nn.one_hot(y_hard_indices, k)
+def round_ste_bwd(residuals, grad_output):
+    return grad_output
 
-    # 3. Save state for backward pass
-    # We save 'y_soft' because the gradient depends on the continuous distribution,
-    # not the hard one-hot vector.
-    return y_hard
+round_ste.defvjp(round_ste_fwd, round_ste_bwd)
 
-
-def _gumbel_ste_fwd(logits, temperature, gumbel_noise):
-    """
-    Forward pass: Compute soft probabilities, then discretize (Hard).
-    """
-    # 1. Compute Softmax (Continuous)
-    # shape: (..., num_classes)
-    y_soft = jax.nn.softmax((logits + gumbel_noise) / temperature)
-
-    # 2. Compute Hard Sample (Discrete)
-    # We use argmax + one_hot to get the discrete output
-    k = y_soft.shape[-1]
-    y_hard_indices = jnp.argmax(y_soft, axis=-1)
-    y_hard = jax.nn.one_hot(y_hard_indices, k)
-
-    # 3. Save state for backward pass
-    # We save 'y_soft' because the gradient depends on the continuous distribution,
-    # not the hard one-hot vector.
-    return y_hard, (y_soft, temperature)
-
-
-def _gumbel_ste_bwd(residuals, grad_output):
-    """
-    Backward pass: Manually compute gradients for Softmax w.r.t logits.
-    """
-    y_soft, temperature = residuals
-
-    # The Gradient Math (Softmax Jacobian-Vector Product):
-    # We want dL/dLogits. We have dL/dOutput (grad_output).
-    # Since this is STE, we pretend Output = y_soft during backward.
-    # d(Softmax)_ij = y_i * (delta_ij - y_j)
-    # VJP = (grad_output - sum(grad_output * y_soft)) * y_soft
-
-    # 1. Compute sum(grad_output * y_soft) across classes
-    # shape: (..., 1)
-    dot = jnp.sum(grad_output * y_soft, axis=-1, keepdims=True)
-
-    # 2. Compute VJP
-    # shape: (..., num_classes)
-    grad_softmax = (grad_output - dot) * y_soft
-
-    # 3. Adjust for temperature (Chain rule: inner derivative is 1/temp)
-    grad_logits = grad_softmax / temperature
-
-    # Return gradients for (logits, temperature, gumbel_noise)
-    # We return None for temp and noise as we aren't optimizing them here.
-    return grad_logits, None, None
-
-
-# Register the custom VJP
-gumbel_softmax_ste.defvjp(_gumbel_ste_fwd, _gumbel_ste_bwd)
-
-# --- 2. The NNX Layer ---
-
-class GumbelSoftmaxSTE(nnx.Module):
-    """
-    Straight-Through Gumbel-Softmax Layer.
-    Compatible with Flax NNX.
-    """
-    @beartype
+class GumbelSigmoidSTE(nnx.Module):
     def __init__(self, temperature: float = 1.0):
-        # Temperature is a static configuration here, but could be a param if desired.
         self.temperature = temperature
 
-    @beartype
-    def __call__(
-        self,
-        logits: Float[Array, "... num_classes"],
-        rngs: nnx.Rngs
-    ) -> Float[Array, "... num_classes"]:
-        """
-        Args:
-            logits: Unnormalized log-probabilities.
-            rngs: NNX Rngs object with 'sampling' key.
-
-        Returns:
-            One-hot encoded hard samples (forward), with softmax gradients (backward).
-        """
-        # 1. Sample Gumbel Noise
-        # Using a stable method to generate Gumbel(0, 1)
-        # u ~ Uniform(0, 1)
+    def __call__(self, logits: Array, rngs: nnx.Rngs) -> Array:
         key = rngs.sampling()
+        eps = 1e-20
         u = jax.random.uniform(key, logits.shape)
-        
-        # Limit u to avoid log(0) issues
-        epsilon = 1e-20
-        gumbel_noise = -jnp.log(-jnp.log(u + epsilon) + epsilon)
+        u = jnp.clip(u, eps, 1.0 - eps)
+        logistic_noise = jnp.log(u / 1-u)
 
-        # 2. Apply Custom Op
-        return gumbel_softmax_ste(logits, self.temperature, gumbel_noise)
+        return round_ste(jax.nn.sigmoid((logits + logistic_noise) / self.temperature))
+
