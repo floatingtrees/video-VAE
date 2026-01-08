@@ -5,8 +5,7 @@ import jax.numpy as jnp
 from flax import nnx
 from beartype import beartype
 from jaxtyping import jaxtyped, Float, Array
-from layers import PatchEmbedding, FactoredAttention
-
+from layers import PatchEmbedding, FactoredAttention, GumbelSigmoidSTE
 
 
 
@@ -20,6 +19,9 @@ class Encoder(nnx.Module):
         self.patch_embedding = PatchEmbedding(height, width, channels, patch_size, rngs)
         self.layers = []
         self.spatial_compression = nnx.Linear(self.last_dim, self.last_dim // spatial_compression_rate, rngs = rngs)
+        self.variance_estimator = nnx.Linear(self.last_dim, self.last_dim // spatial_compression_rate, rngs = rngs)
+        self.selection_layer = nnx.Linear(self.last_dim // spatial_compression_rate, 1, rngs = rngs)
+        self.gumbel_sigmoid = GumbelSigmoidSTE(temperature = 1.0)
         
         max_spatial_len = height // patch_size * width // patch_size
         for _ in range(depth):
@@ -33,12 +35,14 @@ class Encoder(nnx.Module):
             ))
 
 
-    def __call__(self, x: Float[Array, "b time height width channels"], mask: Float[Array, "b 1 1 time"]):
+    def __call__(self, x: Float[Array, "b time height width channels"], mask: Float[Array, "b 1 1 time"], rngs: nnx.Rngs):
         x = self.patch_embedding(x)
         for layer in self.layers:
             x = layer(x, mask)
-        x = self.spatial_compression(x)
-        return x
+        mean = self.spatial_compression(x)
+        variance = self.variance_estimator(x)
+        selection = self.gumbel_sigmoid(self.selection_layer(mean), rngs)
+        return mean, variance, selection
 
 
 

@@ -90,8 +90,9 @@ class FactoredAttention(nnx.Module):
         super().__init__()
         self.SpatialAttention = Attention(in_features, num_heads, qkv_features, max_spatial_len, True, rngs)
         self.SpatialMLP = MLP(in_features, mlp_dim, rngs)
-        self.TemporalAttention = Attention(in_features, num_heads, qkv_features, max_temporal_len, True, rngs)
+        self.TemporalAttention = Attention(in_features, num_heads, qkv_features, max_temporal_len, False, rngs)
         self.TemporalMLP = MLP(in_features, mlp_dim, rngs)
+        self.norm = nnx.LayerNorm(in_features, rngs = rngs)
 
     def __call__(self, x: Float[Array, "b time hw channels"], temporal_mask: Float[Array, "b 1 1 time"]):
         b, t, hw, c = x.shape
@@ -109,7 +110,7 @@ class FactoredAttention(nnx.Module):
         spatial_x = spatial_x + self.SpatialMLP(spatial_x)
         
         original_shape_x = rearrange(spatial_x, "(b t) hw c -> b t hw c", b = b, t = t)
-        return original_shape_x
+        return self.norm(original_shape_x)
 
 @jax.custom_vjp 
 def round_ste(logits: Array) -> Array:
