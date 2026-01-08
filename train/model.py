@@ -34,15 +34,37 @@ class Encoder(nnx.Module):
                 rngs = rngs
             ))
 
-
     def __call__(self, x: Float[Array, "b time height width channels"], mask: Float[Array, "b 1 1 time"], rngs: nnx.Rngs):
         x = self.patch_embedding(x)
         for layer in self.layers:
             x = layer(x, mask)
         mean = self.spatial_compression(x)
-        variance = self.variance_estimator(x)
+        log_variance = self.variance_estimator(x)
         selection = self.gumbel_sigmoid(self.selection_layer(mean), rngs)
-        return mean, variance, selection
+        return mean, log_variance, selection
+
+
+
+def VideoVAE(nnx.Module):
+    def __init__(self, height, width, channels, patch_size, depth, 
+    mlp_dim, num_heads, qkv_features, max_temporal_len, 
+    spatial_compression_rate, rngs: nnx.Rngs):
+        key = rngs.sampling()
+        super().__init__()
+        self.encoder = Encoder(height, width, channels, patch_size, depth, 
+            mlp_dim, num_heads, qkv_features, max_temporal_len, 
+            spatial_compression_rate, rngs)
+        self.decoder = None
+        self.fill_token = nnx.Param(jax.random.normal(key, (1, 1, 1, channels * patch_size * patch_size)), trainable = False)
+        
+    def __call__(self, x: Float[Array, "b time height width channels"], mask: Float[Array, "b 1 1 time"], rngs: nnx.Rngs):
+        mean, log_variance, selection = self.encoder(x, mask, rngs)
+        # Mean, logvar in shape (b, t, hw, c), selection in shape (b, t, hw, 1)
+        key = rngs.sampling()
+        eps = 1e-20
+        noise = jax.random.normal(key, log_variance.shape)
+        variance = jnp.exp(log_variance)
+        sampled_latents = mean + noise * jnp.sqrt(variance)
 
 
 

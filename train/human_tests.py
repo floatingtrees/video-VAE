@@ -5,8 +5,10 @@ from beartype import beartype
 from jaxtyping import jaxtyped, Float, Array
 from einops import rearrange, repeat
 
-
 #jax.config.update("jax_enable_x64", True)
+
+
+
 from model import Encoder
 rng = nnx.Rngs(0)
 seed = 42
@@ -53,6 +55,8 @@ print("Unbatched mean diff: ",jnp.mean(jnp.abs(unbatched_encoder_output - encode
 
 assert jnp.allclose(unbatched_encoder_output, encoder_output[0:1, :, :, :], atol=1e-1)
 
+
+print("ALL TESTS PASSED")
 
 
 
