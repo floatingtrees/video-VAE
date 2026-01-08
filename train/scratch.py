@@ -11,7 +11,7 @@ from layers import Attention
 # Test parameters
 seed = 42
 key = jax.random.key(seed)
-batch_size = 4
+batch_size = 512
 seq_len_full = 32
 seq_len_cut = 10
 dim = 64
@@ -69,7 +69,7 @@ try:
     print(f"Allclose (boolean mask): {jnp.allclose(out_full_bool[:, :seq_len_cut, :], out_cut_no_mask)}")
 except Exception as e:
     print(f"Boolean mask failed with: {e}")
-
+exit()
 # Test 3: 2D mask (query x key)
 print("\n--- Test 3: 2D Mask (query_len x key_len) ---")
 mask_2d = jnp.zeros((batch_size, 1, seq_len_full, seq_len_full))

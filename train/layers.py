@@ -58,11 +58,11 @@ class SinusoidalPositionalEncoding(nnx.Module):
         return x + self.pe_table[:, :seq_len, :]
 
 class Attention(nnx.Module):
-    def __init__(self, in_features, num_heads, qkv_features, max_len, rngs: nnx.Rngs):
+    def __init__(self, in_features, num_heads, qkv_features, max_len, use_qk_norm, rngs: nnx.Rngs):
         super().__init__()
         self.MHA = nnx.MultiHeadAttention(num_heads = num_heads, 
             in_features = in_features, qkv_features = qkv_features, 
-            rngs = rngs, decode = False)
+            rngs = rngs, decode = False, normalize_qk = use_qk_norm)
         self.PE = SinusoidalPositionalEncoding(max_len = max_len, embed_dim = in_features)
         
     def __call__(self, x: Float[Array, "a seq dim"], mask: Float[Array, "b 1 1 time"] = None):
@@ -88,9 +88,9 @@ class MLP(nnx.Module):
 class FactoredAttention(nnx.Module):
     def __init__(self, mlp_dim, in_features, num_heads, qkv_features, max_temporal_len, max_spatial_len, rngs: nnx.Rngs):
         super().__init__()
-        self.SpatialAttention = Attention(in_features, num_heads, qkv_features, max_spatial_len, rngs)
+        self.SpatialAttention = Attention(in_features, num_heads, qkv_features, max_spatial_len, True, rngs)
         self.SpatialMLP = MLP(in_features, mlp_dim, rngs)
-        self.TemporalAttention = Attention(in_features, num_heads, qkv_features, max_temporal_len, rngs)
+        self.TemporalAttention = Attention(in_features, num_heads, qkv_features, max_temporal_len, True, rngs)
         self.TemporalMLP = MLP(in_features, mlp_dim, rngs)
 
     def __call__(self, x: Float[Array, "b time hw channels"], temporal_mask: Float[Array, "b 1 1 time"]):
