@@ -107,6 +107,7 @@ class FactoredAttention(nnx.Module):
         self.TemporalMLP = MLP(in_features, mlp_dim, rngs)
         self.norm = nnx.LayerNorm(in_features, rngs = rngs)
 
+    @nnx.remat
     def __call__(self, x: Float[Array, "b time hw channels"], temporal_mask: Float[Array, "b 1 1 time"]):
         b, t, hw, c = x.shape
         
@@ -146,7 +147,7 @@ class GumbelSigmoidSTE(nnx.Module):
         eps = 1e-20
         u = jax.random.uniform(key, logits.shape)
         u = jnp.clip(u, eps, 1.0 - eps)
-        logistic_noise = jnp.log(u / 1-u)
+        logistic_noise = jnp.log(u / (1-u))
 
         return round_ste(jax.nn.sigmoid((logits + logistic_noise) / self.temperature))
 
