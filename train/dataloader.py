@@ -421,6 +421,7 @@ if __name__ == "__main__":
         shuffle=True,
         num_workers=4,
         prefetch_size=2,
+        seed=10
     )
     
     print("Testing Grain dataloader...")
@@ -456,6 +457,7 @@ if __name__ == "__main__":
     for i, batch in enumerate(batched_dataloader):
         video = jax.device_put(batch["video"], device)
         mask = jax.device_put(batch["mask"], device)
+        print(mask)
         # Sum real frames per video in batch
         real_frames_per_video = mask.sum(axis=1)
         print(f"Batch {i}: video shape={video.shape}, mask shape={mask.shape}, "

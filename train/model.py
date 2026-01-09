@@ -7,7 +7,7 @@ from flax import nnx
 from beartype import beartype
 from jaxtyping import jaxtyped, Float, Array
 from layers import PatchEmbedding, FactoredAttention, GumbelSigmoidSTE, PatchUnEmbedding
-
+from einops import rearrange
 
 
 
@@ -16,15 +16,19 @@ class Encoder(nnx.Module):
     mlp_dim, num_heads, qkv_features, max_temporal_len, 
     spatial_compression_rate, rngs: nnx.Rngs):
         super().__init__()
+        max_spatial_len = height // patch_size * width // patch_size
+
+
         self.last_dim = channels * patch_size * patch_size
         self.patch_embedding = PatchEmbedding(height, width, channels, patch_size, rngs)
         self.layers = []
         self.spatial_compression = nnx.Linear(self.last_dim, self.last_dim // spatial_compression_rate, rngs = rngs)
         self.variance_estimator = nnx.Linear(self.last_dim, self.last_dim // spatial_compression_rate, rngs = rngs)
-        self.selection_layer = nnx.Linear(self.last_dim // spatial_compression_rate, 1, rngs = rngs)
+        self.selection_layer1 = nnx.Linear(self.last_dim // spatial_compression_rate, 1, rngs = rngs)
+        self.selection_layer2 = nnx.Linear(max_spatial_len, 1, rngs = rngs)
         self.gumbel_sigmoid = GumbelSigmoidSTE(temperature = 1.0)
         
-        max_spatial_len = height // patch_size * width // patch_size
+        
         for _ in range(depth):
             self.layers.append(FactoredAttention(mlp_dim = mlp_dim, 
                 in_features = self.last_dim,
@@ -41,7 +45,10 @@ class Encoder(nnx.Module):
             x = layer(x, mask)
         mean = self.spatial_compression(x)
         log_variance = self.variance_estimator(x)
-        selection = self.gumbel_sigmoid(self.selection_layer(mean), rngs)
+        selection_intermediate = self.selection_layer1(mean)
+        selection_intermediate = rearrange(selection_intermediate, "b t hw 1 -> b t hw")
+        selection = self.gumbel_sigmoid(self.selection_layer2(selection_intermediate) + 1, rngs)
+        selection = rearrange(selection, "b t 1 -> b t 1 1")
         return mean, log_variance, selection
 
 class Decoder(nnx.Module):
@@ -89,21 +96,18 @@ class VideoVAE(nnx.Module):
             spatial_compression_rate, rngs)
         self.fill_token = nnx.Param(jax.random.normal(key, (1, 1, 1, channels * patch_size * patch_size // spatial_compression_rate)), trainable = True)
         
-    def __call__(self, x: Float[Array, "b time height width channels"], mask: Float[Array, "b 1 1 time"], rngs: nnx.Rngs, deterministic: bool = False):
+    
+    def __call__(self, x: Float[Array, "b time height width channels"], mask: Float[Array, "b 1 1 time"], rngs: nnx.Rngs):
         mean, log_variance, selection = self.encoder(x, mask, rngs)
         # Mean, logvar in shape (b, t, hw, c), selection in shape (b, t, hw, 1)
-        if not deterministic:
-            key = rngs.sampling()
-            eps = 1e-20
-            noise = jax.random.normal(key, log_variance.shape)
-            variance = jnp.exp(log_variance)
-            sampled_latents = mean + noise * jnp.sqrt(variance)
-            compressed_representation = self.fill_token * (1 - selection) + sampled_latents * selection # fill where not selected
-        else:
-            sampled_latents = mean
+        key = rngs.sampling()
+        noise = jax.random.normal(key, log_variance.shape)
+        std = jnp.exp(log_variance / 2)
+        sampled_latents = mean + noise * std
+        compressed_representation = self.fill_token * (1 - selection) + sampled_latents * selection # fill where not selected
         # selection = 1 means keep, 0 means delete
         reconstruction = self.decoder(compressed_representation, mask, rngs)
-        return reconstruction
+        return reconstruction, compressed_representation, selection, log_variance
 
 
 

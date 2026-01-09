@@ -133,7 +133,7 @@ def round_ste_fwd(logits):
     return jnp.round(logits), ()
 
 def round_ste_bwd(residuals, grad_output):
-    return grad_output
+    return (grad_output, )
 
 round_ste.defvjp(round_ste_fwd, round_ste_bwd)
 
