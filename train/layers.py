@@ -13,19 +13,32 @@ class PatchEmbedding(nnx.Module):
         self.linear = nnx.Linear(patch_size * patch_size * channels, patch_size * patch_size * channels, rngs = rngs)
         self.norm = nnx.LayerNorm(patch_size * patch_size * channels, rngs = rngs)
         
-    @jaxtyped(typechecker=beartype)
     def __call__(self, x: Float[Array, "b time height width channels"]):
         x = rearrange(x, "b t (h p1) (w p2) c -> b t (h w) (p1 p2 c)",
             p1 = self.patch_size, p2 = self.patch_size)
-        x = self.linear(x)
         x = self.norm(x)
+        x = self.linear(x)
+        
         return x
 
-import jax
-import jax.numpy as jnp
-from flax import nnx
-from beartype import beartype
-from jaxtyping import Array, Float
+class PatchUnEmbedding(nnx.Module):
+    def __init__(self, height, width, channels, patch_size, rngs: nnx.Rngs):
+        super().__init__()
+        self.patch_size = patch_size
+        self.height = height
+        self.width = width
+        
+        self.linear = nnx.Linear(patch_size * patch_size * channels, patch_size * patch_size * channels, rngs = rngs)
+        
+    def __call__(self, x: Float[Array, "b time hw ppc"]):
+        x = self.linear(x)
+        x = rearrange(x, " b t (h w) (p1 p2 c) -> b t (h p1) (w p2) c",
+            p1 = self.patch_size, p2 = self.patch_size, 
+            h = self.height // self.patch_size, w = self.width // self.patch_size)
+        
+        
+        
+        return x
 
 def create_sinusoidal_embeddings(
     seq_len: int,

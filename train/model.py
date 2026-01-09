@@ -1,11 +1,12 @@
 from quopri import encodestring
+from timeit import default_timer
 import jax
 #jax.config.update("jax_numpy_rank_promotion", "warn")
 import jax.numpy as jnp
 from flax import nnx
 from beartype import beartype
 from jaxtyping import jaxtyped, Float, Array
-from layers import PatchEmbedding, FactoredAttention, GumbelSigmoidSTE
+from layers import PatchEmbedding, FactoredAttention, GumbelSigmoidSTE, PatchUnEmbedding
 
 
 
@@ -43,9 +44,38 @@ class Encoder(nnx.Module):
         selection = self.gumbel_sigmoid(self.selection_layer(mean), rngs)
         return mean, log_variance, selection
 
+class Decoder(nnx.Module):
+    def __init__(self, height, width, channels, patch_size, depth, 
+    mlp_dim, num_heads, qkv_features, max_temporal_len, 
+    spatial_compression_rate, rngs: nnx.Rngs):
+        super().__init__()
+        self.last_dim = channels * patch_size * patch_size
+        self.patch_unembedding = PatchUnEmbedding(height, width, channels, patch_size, rngs)
+        self.layers = []
+        self.spatial_decompression = nnx.Linear(self.last_dim // spatial_compression_rate, self.last_dim, rngs = rngs)
+        
+        max_spatial_len = height // patch_size * width // patch_size
+        for _ in range(depth):
+            self.layers.append(FactoredAttention(mlp_dim = mlp_dim, 
+                in_features = self.last_dim,
+                num_heads = num_heads,
+                qkv_features = qkv_features,
+                max_temporal_len = max_temporal_len,
+                max_spatial_len = max_spatial_len,
+                rngs = rngs
+            ))
+
+    def __call__(self, x: Float[Array, "b time hw ppc"], mask: Float[Array, "b 1 1 time"], rngs: nnx.Rngs):
+        x = self.spatial_decompression(x)
+        for layer in self.layers:
+            x = layer(x, mask)
+        x = self.patch_unembedding(x)
+        return x
 
 
-def VideoVAE(nnx.Module):
+
+        
+class VideoVAE(nnx.Module):
     def __init__(self, height, width, channels, patch_size, depth, 
     mlp_dim, num_heads, qkv_features, max_temporal_len, 
     spatial_compression_rate, rngs: nnx.Rngs):
@@ -54,17 +84,27 @@ def VideoVAE(nnx.Module):
         self.encoder = Encoder(height, width, channels, patch_size, depth, 
             mlp_dim, num_heads, qkv_features, max_temporal_len, 
             spatial_compression_rate, rngs)
-        self.decoder = None
-        self.fill_token = nnx.Param(jax.random.normal(key, (1, 1, 1, channels * patch_size * patch_size)), trainable = False)
+        self.decoder = Decoder(height, width, channels, patch_size, depth, 
+            mlp_dim, num_heads, qkv_features, max_temporal_len, 
+            spatial_compression_rate, rngs)
+        self.fill_token = nnx.Param(jax.random.normal(key, (1, 1, 1, channels * patch_size * patch_size // spatial_compression_rate)), trainable = True)
         
-    def __call__(self, x: Float[Array, "b time height width channels"], mask: Float[Array, "b 1 1 time"], rngs: nnx.Rngs):
+    def __call__(self, x: Float[Array, "b time height width channels"], mask: Float[Array, "b 1 1 time"], rngs: nnx.Rngs, deterministic: bool = False):
         mean, log_variance, selection = self.encoder(x, mask, rngs)
         # Mean, logvar in shape (b, t, hw, c), selection in shape (b, t, hw, 1)
-        key = rngs.sampling()
-        eps = 1e-20
-        noise = jax.random.normal(key, log_variance.shape)
-        variance = jnp.exp(log_variance)
-        sampled_latents = mean + noise * jnp.sqrt(variance)
+        if not deterministic:
+            key = rngs.sampling()
+            eps = 1e-20
+            noise = jax.random.normal(key, log_variance.shape)
+            variance = jnp.exp(log_variance)
+            sampled_latents = mean + noise * jnp.sqrt(variance)
+            compressed_representation = self.fill_token * (1 - selection) + sampled_latents * selection # fill where not selected
+        else:
+            sampled_latents = mean
+        # selection = 1 means keep, 0 means delete
+        reconstruction = self.decoder(compressed_representation, mask, rngs)
+        return reconstruction
+
 
 
 
