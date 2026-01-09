@@ -107,7 +107,7 @@ class VideoVAE(nnx.Module):
         compressed_representation = self.fill_token * (1 - selection) + sampled_latents * selection # fill where not selected
         # selection = 1 means keep, 0 means delete
         reconstruction = self.decoder(compressed_representation, mask, rngs)
-        return reconstruction, compressed_representation, selection, log_variance
+        return reconstruction, compressed_representation, selection, log_variance, mean
 
 
 

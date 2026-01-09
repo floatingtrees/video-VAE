@@ -13,7 +13,7 @@ from einops import rearrange, repeat, reduce
 #wandb.init(project="video-vae")
 
 NUM_EPOCHS = 100
-BATCH_SIZE = 1
+BATCH_SIZE = 2
 MAX_FRAMES = 128
 RESIZE = (256, 256)
 SHUFFLE = True
@@ -76,14 +76,22 @@ def loss_fn(model: nnx.Module, video: Float[Array, "b time height width channels
     mask: Float[Array, "b 1 1 time"], gamma1: float, gamma2: float, max_compression_rate: float, 
     original_mask: Float[Array, "b time"],
     rngs: nnx.Rngs):
-    reconstruction, compressed_representation, selection, logvar = model(video, mask, rngs)
-    MSE = jnp.mean(jnp.square(video - reconstruction))
-    sequence_lengths = reduce(mask, "b 1 1 time -> b 1", "sum")
-    selection_sum = reduce(selection, "b time 1 1 -> b time", "sum")
+    reconstruction, compressed_representation, selection, logvar, mean = model(video, mask, rngs)
+    sequence_lengths = reduce(original_mask, "b time -> b 1", "sum")
+    selection_sum = reduce(selection, "b time 1 1 -> b 1", "sum")
     kept_frame_density = selection_sum / sequence_lengths
+
+
+    video_shaped_mask = rearrange(original_mask, "b time -> b time 1 1 1")
+    masked_squared_error = jnp.square((video - reconstruction) * video_shaped_mask)
+    sequence_lengths_reshaped = rearrange(sequence_lengths, "b 1 -> b 1 1 1 1")
+    frame_reduced_error = reduce(masked_squared_error, "b time h w c -> b 1 h w c", "sum") / sequence_lengths_reshaped
+    MSE = jnp.mean(frame_reduced_error)
+    
     selection_loss = jnp.mean(jnp.square(kept_frame_density - 1 / max_compression_rate))
     original_mask = rearrange(original_mask, "b time -> b time 1 1")
-    kl_loss = 0.5 * (jnp.exp(logvar) - 1 - logvar) * original_mask / sequence_lengths
+    sequence_lengths_reshaped = rearrange(sequence_lengths, "b 1 -> b 1 1 1")
+    kl_loss = 0.5 * (jnp.exp(logvar) - 1 - logvar + jnp.square(mean)) * original_mask / sequence_lengths_reshaped
     kl_loss = jnp.mean(kl_loss)
     loss = MSE + gamma1 * selection_loss + gamma2 * kl_loss
     return loss, (MSE, selection_loss, kl_loss, reconstruction)
@@ -110,7 +118,7 @@ def eval_step(model, video, mask, gamma1, gamma2, max_compression_rate, hw, rngs
     return loss, MSE, selection_loss, kl_loss, reconstruction
 
 rngs = nnx.Rngs(0)
-jit_train_step = train_step #nnx.jit(train_step)
+jit_train_step = nnx.jit(train_step)
 jit_eval_step = nnx.jit(eval_step)
 device = jax.devices()[0]
 
