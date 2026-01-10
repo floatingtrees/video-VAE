@@ -85,8 +85,8 @@ SEED = 42
 WARMUP_STEPS = 5000
 DECAY_STEPS = 100_000
 GAMMA1 = 0.05
-GAMMA2 = 0.1
-LEARNING_RATE = 5e-5
+GAMMA2 = 0.001
+LEARNING_RATE = 1e-4
 VIDEO_SAVE_DIR = "outputs"
 max_compression_rate = 1.2
 
@@ -128,7 +128,7 @@ if __name__ == "__main__":
     patch_size = 16
     hw = height // patch_size * width // patch_size
     model = VideoVAE(height=height, width=width, channels=3, patch_size=patch_size, 
-        depth=6, mlp_dim=512, num_heads=8, qkv_features=128,
+        depth=6, mlp_dim=1024, num_heads=8, qkv_features=128,
         max_temporal_len=MAX_FRAMES, spatial_compression_rate=4, rngs = nnx.Rngs(1))
 
     params = nnx.state(model, nnx.Param)
