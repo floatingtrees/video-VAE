@@ -82,11 +82,11 @@ NUM_WORKERS = 4
 PREFETCH_SIZE = 16
 DROP_REMAINDER = True
 SEED = 42
-WARMUP_STEPS = 5000
+WARMUP_STEPS = 2500
 DECAY_STEPS = 100_000
-GAMMA1 = 0.05
+GAMMA1 = 0.005
 GAMMA2 = 0.001
-LEARNING_RATE = 1e-4
+LEARNING_RATE = 5e-5
 VIDEO_SAVE_DIR = "outputs"
 max_compression_rate = 1.2
 
@@ -159,7 +159,7 @@ if __name__ == "__main__":
         os.makedirs(os.path.join(VIDEO_SAVE_DIR, f"train/epoch{epoch}"), exist_ok=True)
         os.makedirs(os.path.join(VIDEO_SAVE_DIR, f"eval/epoch{epoch}"), exist_ok=True)
         for i, batch in enumerate(train_dataloader):
-            max_compression_rate += 1e-4
+            max_compression_rate += 1e-5
             video = jax.device_put(batch["video"], device)
             mask = jax.device_put(batch["mask"], device)
             
@@ -169,8 +169,8 @@ if __name__ == "__main__":
                     "video": reconstruction,
                     "mask": mask  # or mask.squeeze(), depending on shape
                 }
-                batch_to_video(recon_batch, os.path.join(VIDEO_SAVE_DIR, f"train/epoch{epoch}/video_latent_{i}.mp4"), fps=30.0)
-                batch_to_video(batch, os.path.join(VIDEO_SAVE_DIR, f"train/epoch{epoch}/video_original_{i}.mp4"), fps=30.0)
+                batch_to_video(recon_batch, os.path.join(VIDEO_SAVE_DIR, f"train/epoch{epoch}/video_{i}_reconstruction.mp4"), fps=30.0)
+                batch_to_video(batch, os.path.join(VIDEO_SAVE_DIR, f"train/epoch{epoch}/video_{i}_original.mp4"), fps=30.0)
             if TRAINING_RUN:
                 wandb.log({
                     "train_loss": loss,
@@ -190,8 +190,8 @@ if __name__ == "__main__":
                     "video": reconstruction,
                     "mask": mask  # or mask.squeeze(), depending on shape
                 }
-                batch_to_video(recon_batch, os.path.join(VIDEO_SAVE_DIR, f"eval/epoch{epoch}/video_latent_{i}.mp4"), fps=30.0)
-                batch_to_video(batch, os.path.join(VIDEO_SAVE_DIR, f"eval/epoch{epoch}/video_original_{i}.mp4"), fps=30.0)
+                batch_to_video(recon_batch, os.path.join(VIDEO_SAVE_DIR, f"eval/epoch{epoch}/video_{i}_reconstruction.mp4"), fps=30.0)
+                batch_to_video(batch, os.path.join(VIDEO_SAVE_DIR, f"eval/epoch{epoch}/video_{i}_original.mp4"), fps=30.0)
             if TRAINING_RUN:
                 wandb.log({
                     "eval_loss": loss,

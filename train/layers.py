@@ -76,9 +76,10 @@ class Attention(nnx.Module):
         self.MHA = nnx.MultiHeadAttention(num_heads = num_heads, 
             in_features = in_features, qkv_features = qkv_features, 
             rngs = rngs, decode = False, normalize_qk = use_qk_norm)
+        
         self.PE = SinusoidalPositionalEncoding(max_len = max_len, embed_dim = in_features)
         
-    def __call__(self, x: Float[Array, "a seq dim"], mask: Float[Array, "b 1 1 time"] = None):
+    def __call__(self, x: Float[Array, "a seq dim"], mask: Float[Array, "b 1 1 time"] = None): # a = hw * b or b * t
         x = self.PE(x)
         attn_output = self.MHA(x, mask = mask)
         return attn_output
