@@ -116,23 +116,27 @@ class Attention(nnx.Module):
     def __init__(self, in_features, num_heads, qkv_features, max_len, use_qk_norm, rngs: nnx.Rngs):
         # use_qk_norm is legacy, now always True
         super().__init__()
-        self.num_heads = nnx.Variable(jnp.zeros((num_heads, 1))) # need to 
+        self.num_heads = num_heads
         head_dim = qkv_features // num_heads
         self.qkv_projection = nnx.Linear(in_features, qkv_features * 3, rngs = rngs)
-        self.out_projection = nnx.Linear(qkv_features, in_features, rngs = rngs)
+        self.out_projection = self.out_projection = nnx.Linear(
+            qkv_features, 
+            in_features, 
+            kernel_init=nnx.initializers.zeros,
+            rngs=rngs
+        )
         self.input_norm = nnx.LayerNorm(in_features, rngs = rngs)
         self.ROPE = RotaryEmbedding(head_dim = head_dim, max_len = max_len)
         self.use_qk_norm = use_qk_norm
-        self.q_norm = nnx.LayerNorm(head_dim, rngs = rngs)
-        self.k_norm = nnx.LayerNorm(head_dim, rngs = rngs)
-        self.out_norm = nnx.LayerNorm(in_features, rngs = rngs)
+        self.q_norm = nnx.LayerNorm(head_dim, rngs = rngs, use_bias = False)
+        self.k_norm = nnx.LayerNorm(head_dim, rngs = rngs, use_bias = False)
         
     def __call__(self, x: Float[Array, "a seq dim"], mask: Float[Array, "b time 1 1 "] = None): # a = hw * b or b * t
         x = self.input_norm(x)
         q, k, v = jnp.split(self.qkv_projection(x), 3, axis = -1)
-        q = rearrange(q, "b seq (head dim) -> b head seq dim", head = self.num_heads.shape[0])
-        k = rearrange(k, "b seq (head dim) -> b head seq dim", head = self.num_heads.shape[0])
-        v = rearrange(v, "b seq (head dim) -> b head seq dim", head = self.num_heads.shape[0])
+        q = rearrange(q, "b seq (head dim) -> b head seq dim", head = self.num_heads)
+        k = rearrange(k, "b seq (head dim) -> b head seq dim", head = self.num_heads)
+        v = rearrange(v, "b seq (head dim) -> b head seq dim", head = self.num_heads)
         q = self.q_norm(q)
         k = self.k_norm(k)
         q, k = self.ROPE.rotate_queries_and_keys(q, k)
@@ -149,7 +153,7 @@ class MLP(nnx.Module):
         self.norm = nnx.LayerNorm(in_features, rngs = rngs)
         self.linear1 = nnx.Linear(in_features, mlp_dim, rngs = rngs)
         
-        self.linear2 = nnx.Linear(mlp_dim, in_features, rngs = rngs)
+        self.linear2 = nnx.Linear(mlp_dim, in_features, kernel_init=nnx.initializers.zeros, rngs = rngs)
         
     def __call__(self, x: Float[Array, "b time hw channels"]):
         x = self.norm(x)
@@ -165,7 +169,6 @@ class FactoredAttention(nnx.Module):
         self.SpatialMLP = MLP(in_features, mlp_dim, rngs)
         self.TemporalAttention = Attention(in_features, num_heads, qkv_features, max_temporal_len, False, rngs)
         self.TemporalMLP = MLP(in_features, mlp_dim, rngs)
-        self.norm = nnx.LayerNorm(in_features, rngs = rngs)
 
     @nnx.remat
     def __call__(self, x: Float[Array, "b time hw channels"], temporal_mask: Float[Array, "b time 1 1 "]):
@@ -175,7 +178,6 @@ class FactoredAttention(nnx.Module):
         temporal_attn_output = self.TemporalAttention(temporal_x, mask = temporal_mask)
         temporal_x = temporal_x + temporal_attn_output
         temporal_x = temporal_x + self.TemporalMLP(temporal_x)
-
         original_shape_x = rearrange(temporal_x, "(b hw) t c -> b t hw c", b = b, hw = hw)
 
         spatial_x = rearrange(original_shape_x, "b t hw c -> (b t) hw c")
@@ -184,7 +186,7 @@ class FactoredAttention(nnx.Module):
         spatial_x = spatial_x + self.SpatialMLP(spatial_x)
         
         original_shape_x = rearrange(spatial_x, "(b t) hw c -> b t hw c", b = b, t = t)
-        return self.norm(original_shape_x)
+        return original_shape_x
 
 @jax.custom_vjp 
 def round_ste(logits: Array) -> Array:

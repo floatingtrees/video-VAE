@@ -18,6 +18,25 @@ from einops import rearrange, repeat, reduce
 import orbax.checkpoint as ocp
 model_save_path = '/mnt/t9/video_vae_saves/'
 
+NUM_EPOCHS = 100
+BATCH_SIZE = 64
+MAX_FRAMES = 8
+RESIZE = (256, 256)
+SHUFFLE = True
+NUM_WORKERS = 4
+PREFETCH_SIZE = 16
+DROP_REMAINDER = True
+SEED = 0
+WARMUP_STEPS = 5000
+DECAY_STEPS = 100_000
+GAMMA1 = 0.01
+GAMMA2 = 0.001
+LEARNING_RATE = 1e-4
+VIDEO_SAVE_DIR = "outputs"
+max_compression_rate = 1.2
+
+
+
 def save_checkpoint(model, optimizer, path):                                                                       
       state = {                                                                                                      
           "model": nnx.state(model),                                                                                 
@@ -25,7 +44,25 @@ def save_checkpoint(model, optimizer, path):
       }                                                                                                              
       ocp.StandardCheckpointer().save(path, state)                                                        
                                                       
-
+def print_max_grad(grads):
+    """
+    Calculates and prints the maximum absolute value found in the entire gradient tree.
+    """
+    # 1. Flatten the PyTree into a list of arrays
+    leaves = jax.tree_util.tree_leaves(grads)
+    
+    # 2. Compute max(abs(x)) for each leaf
+    # We use jnp.max to handle both arrays and scalars
+    max_per_leaf = [jnp.max(jnp.abs(leaf)) for leaf in leaves]
+    
+    # 3. Compute the global max across all leaves
+    global_max = jnp.max(jnp.array(max_per_leaf))
+    
+    # 4. Print
+    # If inside JIT, use jax.debug.print. If outside, standard print works.
+    jax.debug.print("📈 Max Gradient Value: {x:.6f}", x=global_max)
+    
+    return global_max
 
 def loss_fn(model: nnx.Module, video: Float[Array, "b time height width channels"], 
     mask: Float[Array, "b 1 1 time"], gamma1: float, gamma2: float, max_compression_rate: float, 
@@ -33,7 +70,7 @@ def loss_fn(model: nnx.Module, video: Float[Array, "b time height width channels
     rngs: nnx.Rngs):
     reconstruction, compressed_representation, selection, logvar, mean = model(video, mask, rngs)
     sequence_lengths = reduce(original_mask, "b time -> b 1", "sum")
-    sequence_lengths = jnp.clip(sequence_lengths, 1, None)
+    sequence_lengths = jnp.clip(sequence_lengths, 1.0, None)
     
     
 
@@ -62,12 +99,22 @@ def loss_fn(model: nnx.Module, video: Float[Array, "b time height width channels
     kl_loss = 0.5 * (jnp.exp(logvar) - 1 - logvar + jnp.square(mean)) * kl_and_selection_mask / sequence_lengths_reshaped
     kl_loss = jnp.mean(kl_loss)
     loss = MSE + gamma1 * selection_loss + gamma2 * kl_loss      
-    jax.debug.print("Input range: [{min:.3f}, {max:.3f}]", min=video.min(), max=video.max())
-    jax.debug.print("Recon range: [{min:.3f}, {max:.3f}]", min=reconstruction.min(), max=reconstruction.max())
-    jax.debug.print("log_var range: [{min:.3f}, {max:.3f}]", min=logvar.min(), max=logvar.max())
-    jax.debug.print("mean range: [{min:.3f}, {max:.3f}]", min=mean.min(), max=mean.max())                           
+    #jax.debug.print("Input range: [{min:.3f}, {max:.3f}]", min=video.min(), max=video.max())
+    #jax.debug.print("Recon range: [{min:.3f}, {max:.3f}]", min=reconstruction.min(), max=reconstruction.max())
+    #jax.debug.print("log_var range: [{min:.3f}, {max:.3f}]", min=logvar.min(), max=logvar.max())
+    #jax.debug.print("mean range: [{min:.3f}, {max:.3f}]", min=mean.min(), max=mean.max())       
+                       
     return loss, (MSE, selection_loss, kl_loss, reconstruction)
 
+
+def find_first_nan_grad(grads):
+    def check(path, leaf):
+        if jnp.isnan(leaf).any():
+            print(f"❌ NaN Gradient in: {jax.tree_util.keystr(path)}")
+            # Print range to see if it's overflowing
+            print(f"   Range: [{jnp.min(leaf)}, {jnp.max(leaf)}]")
+    
+    jax.tree_util.tree_map_with_path(check, grads)
 
 def train_step(model, optimizer, video, mask, gamma1, gamma2, max_compression_rate, hw, rngs: nnx.Rngs):
     original_mask = mask.copy()
@@ -77,6 +124,7 @@ def train_step(model, optimizer, video, mask, gamma1, gamma2, max_compression_ra
     grad_fn = nnx.value_and_grad(loss_fn, has_aux=True)
     (loss, (MSE, selection_loss, kl_loss, reconstruction)), grads = grad_fn(model, video, mask, gamma1, gamma2, 
     max_compression_rate, original_mask, rngs)
+    #jax.debug.print("Max Gradient Value: {x:.6f}", x=print_max_grad(grads)) 
     optimizer.update(grads)
     
     return loss, MSE, selection_loss, kl_loss, reconstruction
@@ -92,22 +140,7 @@ def eval_step(model, video, mask, gamma1, gamma2, max_compression_rate, hw, rngs
 
 
 
-NUM_EPOCHS = 100
-BATCH_SIZE = 4
-MAX_FRAMES = 4
-RESIZE = (256, 256)
-SHUFFLE = True
-NUM_WORKERS = 4
-PREFETCH_SIZE = 16
-DROP_REMAINDER = True
-SEED = 43
-WARMUP_STEPS = 5000
-DECAY_STEPS = 100_000
-GAMMA1 = 0.05
-GAMMA2 = 0.001
-LEARNING_RATE = 1e-4
-VIDEO_SAVE_DIR = "outputs"
-max_compression_rate = 1.2
+
 
 
 
@@ -148,7 +181,7 @@ if __name__ == "__main__":
     patch_size = 16
     hw = height // patch_size * width // patch_size
     model = VideoVAE(height=height, width=width, channels=3, patch_size=patch_size, 
-        depth=6, mlp_dim=1024, num_heads=8, qkv_features=256,
+        depth=6, mlp_dim=1536, num_heads=8, qkv_features=256,
         max_temporal_len=MAX_FRAMES, spatial_compression_rate=4, rngs = nnx.Rngs(2))
 
     params = nnx.state(model, nnx.Param)
@@ -170,8 +203,8 @@ if __name__ == "__main__":
     #step_count = optimizer.opt_state.count
 
     rngs = nnx.Rngs(3)
-    jit_train_step = train_step# nnx.jit(train_step, static_argnames = ("hw"))
-    jit_eval_step = eval_step# nnx.jit(eval_step, static_argnames = ("hw"))
+    jit_train_step = nnx.jit(train_step, static_argnames = ("hw"))
+    jit_eval_step = nnx.jit(eval_step, static_argnames = ("hw"))
     device = jax.devices()[0]
     start = time.perf_counter()
 

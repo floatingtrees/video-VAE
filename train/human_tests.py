@@ -16,7 +16,7 @@ rng = nnx.Rngs(0)
 seed = 42
 key = jax.random.key(seed)
 batch_size = 3
-temporal_length = 128
+temporal_length = 11
 input_image = jax.random.normal(key, (batch_size, temporal_length, 256, 256, 3)) * 0.02
 input_mask = jnp.ones((batch_size, 1, 1, temporal_length), dtype=bool) 
 input_mask = input_mask.at[:, :, :, 10:].set(False)

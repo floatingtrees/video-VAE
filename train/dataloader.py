@@ -459,6 +459,7 @@ if __name__ == "__main__":
         video = jax.device_put(batch["video"], device)
         mask = jax.device_put(batch["mask"], device)
         print(mask)
+        print(mask[0][0])
         # Sum real frames per video in batch
         real_frames_per_video = mask.sum(axis=1)
         print(f"Batch {i}: video shape={video.shape}, mask shape={mask.shape}, "
