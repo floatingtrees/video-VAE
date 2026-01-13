@@ -125,6 +125,7 @@ class Attention(nnx.Module):
         self.use_qk_norm = use_qk_norm
         self.q_norm = nnx.LayerNorm(head_dim, rngs = rngs)
         self.k_norm = nnx.LayerNorm(head_dim, rngs = rngs)
+        self.out_norm = nnx.LayerNorm(in_features, rngs = rngs)
         
     def __call__(self, x: Float[Array, "a seq dim"], mask: Float[Array, "b time 1 1 "] = None): # a = hw * b or b * t
         x = self.input_norm(x)

@@ -28,7 +28,6 @@ class Encoder(nnx.Module):
         self.selection_layer2 = nnx.Linear(max_spatial_len, 1, rngs = rngs)
         self.gumbel_sigmoid = GumbelSigmoidSTE(temperature = 1.0)
         
-        
         for _ in range(depth):
             self.layers.append(FactoredAttention(mlp_dim = mlp_dim, 
                 in_features = self.last_dim,
@@ -43,8 +42,8 @@ class Encoder(nnx.Module):
         x = self.patch_embedding(x)
         for layer in self.layers:
             x = layer(x, mask)
-        mean = self.spatial_compression(x)
-        log_variance = self.variance_estimator(x)
+        mean = self.spatial_compression(x) * 0.1 # Scale down by 0.1 to prevent early explosion
+        log_variance = self.variance_estimator(x) * 0.1 
         selection_intermediate = self.selection_layer1(mean)
         selection_intermediate = rearrange(selection_intermediate, "b t hw 1 -> b t hw")
         selection = self.gumbel_sigmoid(self.selection_layer2(selection_intermediate) + 1, rngs)
@@ -94,7 +93,7 @@ class VideoVAE(nnx.Module):
         self.decoder = Decoder(height, width, channels, patch_size, depth, 
             mlp_dim, num_heads, qkv_features, max_temporal_len, 
             spatial_compression_rate, rngs)
-        self.fill_token = nnx.Param(jax.random.normal(key, (1, 1, 1, channels * patch_size * patch_size // spatial_compression_rate)), trainable = True)
+        self.fill_token = nnx.Param(jax.random.normal(key, (1, 1, 1, channels * patch_size * patch_size // spatial_compression_rate)) * 0.02, trainable = True)
         
     
     def __call__(self, x: Float[Array, "b time height width channels"], mask: Float[Array, "b 1 1 time"], rngs: nnx.Rngs):
