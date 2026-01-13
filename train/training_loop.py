@@ -159,7 +159,7 @@ if __name__ == "__main__":
         os.makedirs(os.path.join(VIDEO_SAVE_DIR, f"train/epoch{epoch}"), exist_ok=True)
         os.makedirs(os.path.join(VIDEO_SAVE_DIR, f"eval/epoch{epoch}"), exist_ok=True)
         for i, batch in enumerate(train_dataloader):
-            max_compression_rate += 1e-4
+            max_compression_rate += 1e-5
             video = jax.device_put(batch["video"], device)
             mask = jax.device_put(batch["mask"], device)
             

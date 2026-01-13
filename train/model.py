@@ -98,6 +98,7 @@ class VideoVAE(nnx.Module):
         
     
     def __call__(self, x: Float[Array, "b time height width channels"], mask: Float[Array, "b 1 1 time"], rngs: nnx.Rngs):
+        mask = rearrange(mask, "b 1 1 time -> b time 1 1")
         mean, log_variance, selection = self.encoder(x, mask, rngs)
         # Mean, logvar in shape (b, t, hw, c), selection in shape (b, t, hw, 1)
         key = rngs.sampling()
