@@ -164,7 +164,7 @@ if __name__ == "__main__":
             mask = jax.device_put(batch["mask"], device)
             
             loss, MSE, selection_loss, kl_loss, reconstruction = jit_train_step(model, optimizer, video, mask, GAMMA1, GAMMA2, max_compression_rate, hw, rngs)
-            if i % 1000 == 999:
+            if i % 1000 == 0:
                 recon_batch = {
                     "video": reconstruction,
                     "mask": mask  # or mask.squeeze(), depending on shape
@@ -181,6 +181,7 @@ if __name__ == "__main__":
                 })
             else:
                 print(f"Epoch {epoch}, Step {i}: Loss = {loss:.4f}, MSE = {MSE:.4f}, Selection Loss = {selection_loss:.4f}, KL Loss = {kl_loss:.4f}, time = {time.perf_counter() - start:.4f}")
+            break
         for i, batch in enumerate(test_dataloader):
             video = jax.device_put(batch["video"], device)
             mask = jax.device_put(batch["mask"], device)
@@ -202,4 +203,5 @@ if __name__ == "__main__":
                 })
             else:
                 print(f"VALIDATION Epoch {epoch}, Step {i}: Loss = {loss:.4f}, MSE = {MSE:.4f}, Selection Loss = {selection_loss:.4f}, KL Loss = {kl_loss:.4f}")
+            exit()
             

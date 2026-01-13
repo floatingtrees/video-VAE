@@ -38,7 +38,7 @@ def batch_to_video(
     
     video = batch["video"]
     mask = batch["mask"]
-    
+    videos = jnp.clip(video, 0, 1)
     # Convert JAX arrays to numpy
     if hasattr(video, "device"):
         video = np.array(video)
@@ -446,7 +446,7 @@ if __name__ == "__main__":
     print("\nTesting batched Grain dataloader...")
     batched_dataloader = create_batched_dataloader(
         batch_size=4,
-        max_frames=1024,
+        max_frames=128,
         resize=(256, 256),
         shuffle=True,
         num_workers=4,
