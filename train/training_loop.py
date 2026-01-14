@@ -41,12 +41,12 @@ NUM_WORKERS = 4
 PREFETCH_SIZE = 16
 DROP_REMAINDER = True
 SEED = 0
-
+import math
 DECAY_STEPS = 100_000
-GAMMA1 = 0.005 # If too low, the encoder used to drop all frames, but STE gating function should prevent that now
-GAMMA2 = 0.01
+GAMMA1 = 0.5 # If too low, the encoder used to drop all frames, but STE gating function should prevent that now
+GAMMA2 = 0.001
 LEARNING_RATE = 1e-4
-WARMUP_STEPS = 20000 // BATCH_SIZE
+WARMUP_STEPS = 20000 // math.sqrt(BATCH_SIZE)
 VIDEO_SAVE_DIR = "outputs"
 max_compression_rate = 1.2
 
@@ -170,28 +170,7 @@ if __name__ == "__main__":
         model_save_path = '/mnt/t9/video_vae_saves_training/'
         wandb.init(project="video-vae")
     reset_directory(model_save_path)
-    train_dataloader = create_batched_dataloader(
-        batch_size=BATCH_SIZE,
-        max_frames=MAX_FRAMES,
-        resize=RESIZE,
-        shuffle=SHUFFLE,
-        num_workers=NUM_WORKERS,
-        prefetch_size=PREFETCH_SIZE,
-        drop_remainder=DROP_REMAINDER,
-        seed=SEED
-    )
 
-    test_dataloader = create_batched_dataloader(
-        base_dir = "/mnt/t9/videos_eval",
-        batch_size=BATCH_SIZE,
-        max_frames=MAX_FRAMES,
-        resize=RESIZE,
-        shuffle=SHUFFLE,
-        num_workers=NUM_WORKERS,
-        prefetch_size=PREFETCH_SIZE,
-        drop_remainder=DROP_REMAINDER,
-        seed=SEED
-    )
     height, width = (256, 256)
     patch_size = 16
     hw = height // patch_size * width // patch_size
@@ -226,10 +205,32 @@ if __name__ == "__main__":
     for epoch in range(NUM_EPOCHS):
         os.makedirs(os.path.join(VIDEO_SAVE_DIR, f"train/epoch{epoch}"), exist_ok=True)
         os.makedirs(os.path.join(VIDEO_SAVE_DIR, f"eval/epoch{epoch}"), exist_ok=True)
-        
+        train_dataloader = create_batched_dataloader(
+                batch_size=BATCH_SIZE,
+                max_frames=MAX_FRAMES,
+                resize=RESIZE,
+                shuffle=SHUFFLE,
+                num_workers=NUM_WORKERS,
+                prefetch_size=PREFETCH_SIZE,
+                drop_remainder=DROP_REMAINDER,
+                seed=SEED + epoch
+            )
+
+        test_dataloader = create_batched_dataloader(
+                base_dir = "/mnt/t9/videos_eval",
+                batch_size=BATCH_SIZE,
+                max_frames=MAX_FRAMES,
+                resize=RESIZE,
+                shuffle=SHUFFLE,
+                num_workers=NUM_WORKERS,
+                prefetch_size=PREFETCH_SIZE,
+                drop_remainder=DROP_REMAINDER,
+                seed=SEED + epoch
+            )
 
         for i, batch in enumerate(train_dataloader):
-            
+            if i > 115000 // BATCH_SIZE: # Dataloader doesn't natually terminate for some reason
+                break
             max_compression_rate += 1e-5
             video = jax.device_put(batch["video"], device)
             mask = jax.device_put(batch["mask"], device)
