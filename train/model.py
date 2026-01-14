@@ -42,8 +42,8 @@ class Encoder(nnx.Module):
         x = self.patch_embedding(x)
         for layer in self.layers:
             x = layer(x, mask)
-        mean = self.spatial_compression(x) * 0.1 # Scale down by 0.1 to prevent early explosion
-        log_variance = self.variance_estimator(x) * 0.1 
+        mean = self.spatial_compression(x)# Scale down by 0.1 to prevent early explosion
+        log_variance = self.variance_estimator(x)
         selection_intermediate = self.selection_layer1(mean)
         selection_intermediate = rearrange(selection_intermediate, "b t hw 1 -> b t hw")
         selection = self.gumbel_sigmoid(self.selection_layer2(selection_intermediate) + 1, rngs)
@@ -104,7 +104,10 @@ class VideoVAE(nnx.Module):
         noise = jax.random.normal(key, log_variance.shape)
         std = jnp.exp(log_variance / 2)
         sampled_latents = mean + noise * std
-        compressed_representation = self.fill_token * (1 - selection) + sampled_latents * selection # fill where not selected
+        compressed_representation = self.fill_token * (1 - selection) + mean - jax.lax.stop_gradient(
+            mean * (1 - selection))
+            # Use an STE so model can't reward hack by dropping all frames
+            # Keep var out of it, otherwise kl loss explodes
         # selection = 1 means keep, 0 means delete
         reconstruction = self.decoder(compressed_representation, mask, rngs)
         return reconstruction, compressed_representation, selection, log_variance, mean

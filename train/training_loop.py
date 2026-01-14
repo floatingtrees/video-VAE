@@ -17,6 +17,20 @@ from einops import rearrange, repeat, reduce
 
 import orbax.checkpoint as ocp
 model_save_path = '/mnt/t9/video_vae_saves/'
+import shutil
+import os
+
+def reset_directory(path):
+    # 1. Check if it exists and delete it
+    if os.path.exists(path):
+        shutil.rmtree(path)
+        print(f"Deleted: {path}")
+    
+    # 2. Recreate the empty directory
+    os.makedirs(path, exist_ok=True)
+    print(f"Created/Reloaded: {path}")
+
+
 
 NUM_EPOCHS = 100
 BATCH_SIZE = 64
@@ -27,11 +41,12 @@ NUM_WORKERS = 4
 PREFETCH_SIZE = 16
 DROP_REMAINDER = True
 SEED = 0
-WARMUP_STEPS = 5000
+
 DECAY_STEPS = 100_000
-GAMMA1 = 0.01
-GAMMA2 = 0.001
+GAMMA1 = 0.005 # If too low, the encoder used to drop all frames, but STE gating function should prevent that now
+GAMMA2 = 0.01
 LEARNING_RATE = 1e-4
+WARMUP_STEPS = 20000 // BATCH_SIZE
 VIDEO_SAVE_DIR = "outputs"
 max_compression_rate = 1.2
 
@@ -154,7 +169,7 @@ if __name__ == "__main__":
     if TRAINING_RUN:
         model_save_path = '/mnt/t9/video_vae_saves_training/'
         wandb.init(project="video-vae")
-
+    reset_directory(model_save_path)
     train_dataloader = create_batched_dataloader(
         batch_size=BATCH_SIZE,
         max_frames=MAX_FRAMES,
