@@ -8,34 +8,42 @@ from beartype import beartype
 from jaxtyping import jaxtyped, Float, Array
 from layers import PatchEmbedding, FactoredAttention, GumbelSigmoidSTE, PatchUnEmbedding
 from einops import rearrange
-
+from unet import UNet
 
 
 class Encoder(nnx.Module):
-    def __init__(self, height, width, channels, patch_size, depth, 
-    mlp_dim, num_heads, qkv_features, max_temporal_len, 
-    spatial_compression_rate, rngs: nnx.Rngs):
+    def __init__(self, height, width, channels, patch_size, depth,
+    mlp_dim, num_heads, qkv_features, max_temporal_len,
+    spatial_compression_rate, rngs: nnx.Rngs,
+    dtype: jnp.dtype = jnp.bfloat16, param_dtype: jnp.dtype = jnp.float32):
         super().__init__()
         max_spatial_len = height // patch_size * width // patch_size
 
 
         self.last_dim = channels * patch_size * patch_size
-        self.patch_embedding = PatchEmbedding(height, width, channels, patch_size, rngs)
+        self.patch_embedding = PatchEmbedding(height, width, channels, patch_size, rngs,
+                                              dtype=dtype, param_dtype=param_dtype)
         self.layers = []
-        self.spatial_compression = nnx.Linear(self.last_dim, self.last_dim // spatial_compression_rate, rngs = rngs)
-        self.variance_estimator = nnx.Linear(self.last_dim, self.last_dim // spatial_compression_rate, rngs = rngs)
-        self.selection_layer1 = nnx.Linear(self.last_dim // spatial_compression_rate, 1, rngs = rngs)
-        self.selection_layer2 = nnx.Linear(max_spatial_len, 1, rngs = rngs)
+        self.spatial_compression = nnx.Linear(self.last_dim, self.last_dim // spatial_compression_rate,
+                                              dtype=dtype, param_dtype=param_dtype, rngs=rngs)
+        self.variance_estimator = nnx.Linear(self.last_dim, self.last_dim // spatial_compression_rate,
+                                             dtype=dtype, param_dtype=param_dtype, rngs=rngs)
+        self.selection_layer1 = nnx.Linear(self.last_dim // spatial_compression_rate, 1,
+                                           dtype=dtype, param_dtype=param_dtype, rngs=rngs)
+        self.selection_layer2 = nnx.Linear(max_spatial_len, 1,
+                                           dtype=dtype, param_dtype=param_dtype, rngs=rngs)
         self.gumbel_sigmoid = GumbelSigmoidSTE(temperature = 1.0)
-        
+
         for _ in range(depth):
-            self.layers.append(FactoredAttention(mlp_dim = mlp_dim, 
+            self.layers.append(FactoredAttention(mlp_dim = mlp_dim,
                 in_features = self.last_dim,
                 num_heads = num_heads,
                 qkv_features = qkv_features,
                 max_temporal_len = max_temporal_len,
                 max_spatial_len = max_spatial_len,
-                rngs = rngs
+                rngs = rngs,
+                dtype=dtype,
+                param_dtype=param_dtype
             ))
 
     def __call__(self, x: Float[Array, "b time height width channels"], mask: Float[Array, "b 1 1 time"], rngs: nnx.Rngs):
@@ -43,7 +51,8 @@ class Encoder(nnx.Module):
         for layer in self.layers:
             x = layer(x, mask)
         mean = self.spatial_compression(x)
-        log_variance = self.variance_estimator(x)
+        variance = jax.nn.softplus(self.variance_estimator(x)) # Predict softplus^-1(variance) instead of log
+        log_variance = jnp.log(variance)
         selection_intermediate = self.selection_layer1(mean)
         selection_intermediate = rearrange(selection_intermediate, "b t hw 1 -> b t hw")
         selection = self.gumbel_sigmoid(self.selection_layer2(selection_intermediate) + 1, rngs)
@@ -51,51 +60,61 @@ class Encoder(nnx.Module):
         return mean, log_variance, selection
 
 class Decoder(nnx.Module):
-    def __init__(self, height, width, channels, patch_size, depth, 
-    mlp_dim, num_heads, qkv_features, max_temporal_len, 
-    spatial_compression_rate, rngs: nnx.Rngs):
+    def __init__(self, height, width, channels, patch_size, depth,
+    mlp_dim, num_heads, qkv_features, max_temporal_len,
+    spatial_compression_rate, unembedding_upsample_rate, rngs: nnx.Rngs,
+    dtype: jnp.dtype = jnp.bfloat16, param_dtype: jnp.dtype = jnp.float32):
         super().__init__()
         self.last_dim = channels * patch_size * patch_size
-        self.patch_unembedding = PatchUnEmbedding(height, width, channels, patch_size, rngs)
+        self.patch_unembedding = PatchUnEmbedding(height, width, channels, patch_size, unembedding_upsample_rate, rngs,
+                                                  dtype=dtype, param_dtype=param_dtype)
         self.layers = []
-        self.spatial_decompression = nnx.Linear(self.last_dim // spatial_compression_rate, self.last_dim, rngs = rngs)
-        
+        self.spatial_decompression = nnx.Linear(self.last_dim // spatial_compression_rate, self.last_dim,
+                                                dtype=dtype, param_dtype=param_dtype, rngs=rngs)
+
         max_spatial_len = height // patch_size * width // patch_size
         for _ in range(depth):
-            self.layers.append(FactoredAttention(mlp_dim = mlp_dim, 
+            self.layers.append(FactoredAttention(mlp_dim = mlp_dim,
                 in_features = self.last_dim,
                 num_heads = num_heads,
                 qkv_features = qkv_features,
                 max_temporal_len = max_temporal_len,
                 max_spatial_len = max_spatial_len,
-                rngs = rngs
+                rngs = rngs,
+                dtype=dtype,
+                param_dtype=param_dtype
             ))
+        self.unet = UNet(channels=channels * unembedding_upsample_rate, base_features=16, num_levels=2,
+                         out_features=channels, rngs=rngs, dtype=dtype, param_dtype=param_dtype)
 
     def __call__(self, x: Float[Array, "b time hw ppc"], mask: Float[Array, "b 1 1 time"], rngs: nnx.Rngs):
         x = self.spatial_decompression(x)
         for layer in self.layers:
             x = layer(x, mask)
-        x = self.patch_unembedding(x)
+        convolutional_upsampled_features, x = self.patch_unembedding(x)
+        unet_output = self.unet(convolutional_upsampled_features)
+        x = x + unet_output
         return x
 
 
 
-        
 class VideoVAE(nnx.Module):
-    def __init__(self, height, width, channels, patch_size, depth, 
-    mlp_dim, num_heads, qkv_features, max_temporal_len, 
-    spatial_compression_rate, rngs: nnx.Rngs):
+    def __init__(self, height, width, channels, patch_size, depth,
+    mlp_dim, num_heads, qkv_features, max_temporal_len,
+    spatial_compression_rate, unembedding_upsample_rate, rngs: nnx.Rngs,
+    dtype: jnp.dtype = jnp.bfloat16, param_dtype: jnp.dtype = jnp.float32):
         key = rngs.sampling()
         super().__init__()
-        self.encoder = Encoder(height, width, channels, patch_size, depth, 
-            mlp_dim, num_heads, qkv_features, max_temporal_len, 
-            spatial_compression_rate, rngs)
-        self.decoder = Decoder(height, width, channels, patch_size, depth, 
-            mlp_dim, num_heads, qkv_features, max_temporal_len, 
-            spatial_compression_rate, rngs)
+        self.encoder = Encoder(height, width, channels, patch_size, depth,
+            mlp_dim, num_heads, qkv_features, max_temporal_len,
+            spatial_compression_rate, rngs, dtype=dtype, param_dtype=param_dtype)
+        self.decoder = Decoder(height, width, channels, patch_size, depth,
+            mlp_dim, num_heads, qkv_features, max_temporal_len,
+            spatial_compression_rate, unembedding_upsample_rate, rngs,
+            dtype=dtype, param_dtype=param_dtype)
         self.fill_token = nnx.Param(jax.random.normal(key, (1, 1, 1, channels * patch_size * patch_size // spatial_compression_rate)) * 0.02, trainable = True)
-        
-    
+
+
     def __call__(self, x: Float[Array, "b time height width channels"], mask: Float[Array, "b 1 1 time"], rngs: nnx.Rngs):
         mask = rearrange(mask, "b 1 1 time -> b time 1 1")
         mean, log_variance, selection = self.encoder(x, mask, rngs)
@@ -112,9 +131,6 @@ class VideoVAE(nnx.Module):
 
 
 
-
-
-
 if __name__ == "__main__":
     # 1. Get the GPU device handle
     seed = 42
@@ -125,7 +141,7 @@ if __name__ == "__main__":
         raise RuntimeError("No GPU found! Is JAX installed with CUDA support?")
     temporal_length = 128
     input_image = jax.random.normal(key, (10, temporal_length, 256, 256, 3)) * 0.02
-    encoder = Encoder(height=256, width=256, channels=3, patch_size=16, 
+    encoder = Encoder(height=256, width=256, channels=3, patch_size=16,
     depth=6, mlp_dim=512, num_heads=8, qkv_features=128,
     max_temporal_len=temporal_length, spatial_compression_rate=4, rngs = nnx.Rngs(0))
 
@@ -133,7 +149,7 @@ if __name__ == "__main__":
 
     jit_forward = nnx.jit(encoder.__call__)
 
-    import time 
+    import time
     start = time.perf_counter()
     output = jit_forward(input_image)
     print(time.perf_counter() - start)

@@ -33,7 +33,7 @@ def reset_directory(path):
 
 
 NUM_EPOCHS = 100
-BATCH_SIZE = 64
+BATCH_SIZE = 32
 MAX_FRAMES = 8
 RESIZE = (256, 256)
 SHUFFLE = True
@@ -45,11 +45,10 @@ import math
 DECAY_STEPS = 100_000
 GAMMA1 = 0.5 # If too low, the encoder used to drop all frames, but STE gating function should prevent that now
 GAMMA2 = 0.001
-LEARNING_RATE = 1e-4
+LEARNING_RATE = 5e-5
 WARMUP_STEPS = 20000 // math.sqrt(BATCH_SIZE)
 VIDEO_SAVE_DIR = "outputs"
 max_compression_rate = 1.2
-
 
 
 def save_checkpoint(model, optimizer, path):                                                                       
@@ -176,7 +175,7 @@ if __name__ == "__main__":
     hw = height // patch_size * width // patch_size
     model = VideoVAE(height=height, width=width, channels=3, patch_size=patch_size, 
         depth=6, mlp_dim=1536, num_heads=8, qkv_features=256,
-        max_temporal_len=MAX_FRAMES, spatial_compression_rate=4, rngs = nnx.Rngs(2))
+        max_temporal_len=MAX_FRAMES, spatial_compression_rate=4, unembedding_upsample_rate=4, rngs = nnx.Rngs(2))
 
     params = nnx.state(model, nnx.Param)
     num_params = sum(x.size for x in jax.tree_util.tree_leaves(params))
@@ -235,6 +234,7 @@ if __name__ == "__main__":
             video = jax.device_put(batch["video"], device)
             mask = jax.device_put(batch["mask"], device)
             mask = mask.astype(jnp.bool)
+            video = video.astype(jnp.bfloat16)
             
             loss, MSE, selection_loss, kl_loss, reconstruction = jit_train_step(model, optimizer, video, mask, GAMMA1, GAMMA2, max_compression_rate, hw, rngs)                                  
             if i % 1000 == 999:
@@ -253,7 +253,7 @@ if __name__ == "__main__":
                     "train_time": time.perf_counter() - start
                 })
             else:
-                print(f"Epoch {epoch}, Step {i}: Loss = {loss:.4f}, MSE = {MSE:.4f}, Selection Loss = {selection_loss:.4f}, KL Loss = {kl_loss:.4f}, time = {time.perf_counter() - start:.4f}")
+                print(f"Epoch {epoch}, Step {i}: Loss = {float(loss):.4f}, MSE = {float(MSE):.4f}, Selection Loss = {float(selection_loss):.4f}, KL Loss = {float(kl_loss):.4f}, time = {time.perf_counter() - start:.4f}")
         save_checkpoint(model, optimizer, f"{model_save_path}/checkpoint_{epoch}")
         for i, batch in enumerate(test_dataloader):
             video = jax.device_put(batch["video"], device)
@@ -276,5 +276,5 @@ if __name__ == "__main__":
                     "eval_time": time.perf_counter() - start
                 })
             else:
-                print(f"VALIDATION Epoch {epoch}, Step {i}: Loss = {loss:.4f}, MSE = {MSE:.4f}, Selection Loss = {selection_loss:.4f}, KL Loss = {kl_loss:.4f}")
+                print(f"VALIDATION Epoch {epoch}, Step {i}: Loss = {float(loss):.4f}, MSE = {float(MSE):.4f}, Selection Loss = {float(selection_loss):.4f}, KL Loss = {float(kl_loss):.4f}")
             

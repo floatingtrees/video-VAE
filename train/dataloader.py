@@ -5,7 +5,7 @@ import numpy as np
 from typing import Optional, List, Tuple, Dict, Union
 import cv2
 import grain.python as grain
-
+from random import randint
 
 def batch_to_video(
     batch: Dict[str, Union[np.ndarray, jnp.ndarray]],
@@ -176,12 +176,18 @@ def load_video(
     frames = []
     frame_count = 0
     crop_params = None  # Will be set on first frame
-    
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    start_frame = randint(0, max(total_frames - max_frames, 0))
+    counter = 0
     while True:
+        ret, frame = cap.read()
+        if counter < start_frame:
+            counter += 1
+            continue
         if max_frames is not None and frame_count >= max_frames:
             break
             
-        ret, frame = cap.read()
+        
         if not ret:
             break
         
