@@ -43,7 +43,7 @@ DROP_REMAINDER = True
 SEED = 0
 import math
 DECAY_STEPS = 100_000
-GAMMA1 = 0.5 # If too low, the encoder used to drop all frames, but STE gating function should prevent that now
+GAMMA1 = 0.005 # If too low, the encoder used to drop all frames, but STE gating function should prevent that now
 GAMMA2 = 0.001
 LEARNING_RATE = 5e-5
 WARMUP_STEPS = 20000 // math.sqrt(BATCH_SIZE)
@@ -57,7 +57,13 @@ def save_checkpoint(model, optimizer, path):
           "optimizer": nnx.state(optimizer)                                                                          
       }                                                                                                              
       ocp.StandardCheckpointer().save(path, state)                                                        
-                                                      
+
+
+def magnify_negatives(x):
+    # Logic: If x < 0, return x * 10. Otherwise, return x.
+    return jnp.where(x < 0, x * 100, x)
+
+                               
 def print_max_grad(grads):
     """
     Calculates and prints the maximum absolute value found in the entire gradient tree.
@@ -100,12 +106,17 @@ def loss_fn(model: nnx.Module, video: Float[Array, "b time height width channels
     kl_and_selection_mask = rearrange(original_mask, "b time -> b time 1 1")
 
     selection_sum = reduce(selection * kl_and_selection_mask, "b time 1 1 -> b 1", "sum")
+
+    # Kept frame density high -> lots of kept frames
     kept_frame_density = selection_sum / sequence_lengths
     # This is kind of weird 
     # The idea is that we want to keep the frame density as close to 1 / max_compression_rate as possible
     # Alternatively, we can lower bound kept_frame_density - (1 / max_compression_rate) 
     # But this runs into starvation risks if the encoder takes too long to reduce MSE
-    selection_loss = jnp.mean(jnp.square(kept_frame_density - (1 / max_compression_rate)))
+    
+    density_compression_difference = kept_frame_density - (1 / max_compression_rate)
+    # We want kept_frame_density > max_compression_rate to prevent dropping all frames, so we magnify negatives
+    selection_loss = jnp.mean(jnp.square(magnify_negatives(density_compression_difference)))
 
 
     
@@ -242,8 +253,8 @@ if __name__ == "__main__":
                     "video": reconstruction,
                     "mask": mask  # or mask.squeeze(), depending on shape
                 }
-                batch_to_video(recon_batch, os.path.join(VIDEO_SAVE_DIR, f"train/epoch{epoch}/video_latent_{i}.mp4"), fps=30.0)
-                batch_to_video(batch, os.path.join(VIDEO_SAVE_DIR, f"train/epoch{epoch}/video_original_{i}.mp4"), fps=30.0)
+                batch_to_video(recon_batch, os.path.join(VIDEO_SAVE_DIR, f"train/epoch{epoch}/video_{i}_latent.mp4"), fps=30.0)
+                batch_to_video(batch, os.path.join(VIDEO_SAVE_DIR, f"train/epoch{epoch}/video_{i}_original.mp4"), fps=30.0)
             if TRAINING_RUN:
                 wandb.log({
                     "train_loss": loss,
@@ -265,8 +276,8 @@ if __name__ == "__main__":
                     "video": reconstruction,
                     "mask": mask  # or mask.squeeze(), depending on shape
                 }
-                batch_to_video(recon_batch, os.path.join(VIDEO_SAVE_DIR, f"eval/epoch{epoch}/video_latent_{i}.mp4"), fps=30.0)
-                batch_to_video(batch, os.path.join(VIDEO_SAVE_DIR, f"eval/epoch{epoch}/video_original_{i}.mp4"), fps=30.0)
+                batch_to_video(recon_batch, os.path.join(VIDEO_SAVE_DIR, f"eval/epoch{epoch}/video_{i}_latent.mp4"), fps=30.0)
+                batch_to_video(batch, os.path.join(VIDEO_SAVE_DIR, f"eval/epoch{epoch}/video_{i}_original.mp4"), fps=30.0)
             if TRAINING_RUN:
                 wandb.log({
                     "eval_loss": loss,
