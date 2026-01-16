@@ -46,7 +46,7 @@ class Encoder(nnx.Module):
                 param_dtype=param_dtype
             ))
 
-    def __call__(self, x: Float[Array, "b time height width channels"], mask: Float[Array, "b 1 1 time"], rngs: nnx.Rngs):
+    def __call__(self, x: Float[Array, "b time height width channels"], mask: Float[Array, "b 1 1 time"], rngs: nnx.Rngs, train: bool = True):
         x = self.patch_embedding(x)
         for layer in self.layers:
             x = layer(x, mask)
@@ -55,7 +55,7 @@ class Encoder(nnx.Module):
         log_variance = jnp.log(variance)
         selection_intermediate = self.selection_layer1(mean)
         selection_intermediate = rearrange(selection_intermediate, "b t hw 1 -> b t hw")
-        selection = self.gumbel_sigmoid(self.selection_layer2(selection_intermediate) + 1, rngs)
+        selection = self.gumbel_sigmoid(self.selection_layer2(selection_intermediate) + 1, rngs, train=train)
         selection = rearrange(selection, "b t 1 -> b t 1 1")
         return mean, log_variance, selection
 
@@ -84,10 +84,10 @@ class Decoder(nnx.Module):
                 dtype=dtype,
                 param_dtype=param_dtype
             ))
-        self.unet = UNet(channels=channels * unembedding_upsample_rate, base_features=16, num_levels=2,
+        self.unet = UNet(channels=channels * unembedding_upsample_rate, base_features=16, num_levels=3,
                          out_features=channels, rngs=rngs, dtype=dtype, param_dtype=param_dtype)
 
-    def __call__(self, x: Float[Array, "b time hw ppc"], mask: Float[Array, "b 1 1 time"], rngs: nnx.Rngs):
+    def __call__(self, x: Float[Array, "b time hw ppc"], mask: Float[Array, "b 1 1 time"], rngs: nnx.Rngs, train: bool = True):
         x = self.spatial_decompression(x)
         for layer in self.layers:
             x = layer(x, mask)
@@ -115,17 +115,23 @@ class VideoVAE(nnx.Module):
         self.fill_token = nnx.Param(jax.random.normal(key, (1, 1, 1, channels * patch_size * patch_size // spatial_compression_rate)) * 0.02, trainable = True)
 
 
-    def __call__(self, x: Float[Array, "b time height width channels"], mask: Float[Array, "b 1 1 time"], rngs: nnx.Rngs):
+    def __call__(self, x: Float[Array, "b time height width channels"], mask: Float[Array, "b 1 1 time"], rngs: nnx.Rngs, train: bool = True):
         mask = rearrange(mask, "b 1 1 time -> b time 1 1")
-        mean, log_variance, selection = self.encoder(x, mask, rngs)
+        mean, log_variance, selection = self.encoder(x, mask, rngs, train=train)
         # Mean, logvar in shape (b, t, hw, c), selection in shape (b, t, hw, 1)
-        key = rngs.sampling()
-        noise = jax.random.normal(key, log_variance.shape)
-        std = jnp.exp(log_variance / 2)
 
-        compressed_representation = self.fill_token * (1 - selection) + (mean + noise * std) * selection
+        if train:
+            key = rngs.sampling()
+            noise = jax.random.normal(key, log_variance.shape)
+            std = jnp.exp(log_variance / 2)
+            sampled_latent = mean + noise * std
+        else:
+            # During eval, use deterministic mean
+            sampled_latent = mean
+
+        compressed_representation = self.fill_token * (1 - selection) + sampled_latent * selection
         # selection = 1 means keep, 0 means delete
-        reconstruction = self.decoder(compressed_representation, mask, rngs)
+        reconstruction = self.decoder(compressed_representation, mask, rngs, train=train)
         return reconstruction, compressed_representation, selection, log_variance, mean
 
 

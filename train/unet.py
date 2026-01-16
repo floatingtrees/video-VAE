@@ -22,6 +22,7 @@ class ConvBlock(nnx.Module):
         self.norm = nnx.GroupNorm(num_groups=min(8, out_channels), num_features=out_channels,
                                    dtype=dtype, param_dtype=param_dtype, rngs=rngs)
 
+    
     def __call__(self, x: Float[Array, "b h w c"]) -> Float[Array, "b h w c"]:
         x = self.conv(x)
         x = self.norm(x)
@@ -38,7 +39,7 @@ class DownBlock(nnx.Module):
                                dtype=dtype, param_dtype=param_dtype)
         self.conv2 = ConvBlock(out_channels, out_channels, kernel_size=3, rngs=rngs,
                                dtype=dtype, param_dtype=param_dtype)
-
+    @nnx.remat
     def __call__(self, x: Float[Array, "b h w c"]) -> tuple:
         x = self.conv1(x)
         x = self.conv2(x)
@@ -69,6 +70,7 @@ class UpBlock(nnx.Module):
         self.conv2 = ConvBlock(out_channels, out_channels, kernel_size=3, rngs=rngs,
                                dtype=dtype, param_dtype=param_dtype)
 
+    @nnx.remat
     def __call__(self, x: Float[Array, "b h w c"], skip: Float[Array, "b h2 w2 c2"]) -> Float[Array, "b h2 w2 c2"]:
         x = self.upsample(x)
         # Concatenate with skip connection

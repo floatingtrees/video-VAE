@@ -48,7 +48,7 @@ GAMMA2 = 0.001
 LEARNING_RATE = 5e-5
 WARMUP_STEPS = 20000 // math.sqrt(BATCH_SIZE)
 VIDEO_SAVE_DIR = "outputs"
-max_compression_rate = 1.2
+max_compression_rate = 2
 
 
 def save_checkpoint(model, optimizer, path):                                                                       
@@ -84,11 +84,11 @@ def print_max_grad(grads):
     
     return global_max
 
-def loss_fn(model: nnx.Module, video: Float[Array, "b time height width channels"], 
-    mask: Float[Array, "b 1 1 time"], gamma1: float, gamma2: float, max_compression_rate: float, 
+def loss_fn(model: nnx.Module, video: Float[Array, "b time height width channels"],
+    mask: Float[Array, "b 1 1 time"], gamma1: float, gamma2: float, max_compression_rate: float,
     original_mask: Float[Array, "b time"],
-    rngs: nnx.Rngs):
-    reconstruction, compressed_representation, selection, logvar, mean = model(video, mask, rngs)
+    rngs: nnx.Rngs, train: bool = True):
+    reconstruction, compressed_representation, selection, logvar, mean = model(video, mask, rngs, train=train)
     sequence_lengths = reduce(original_mask, "b time -> b 1", "sum")
     sequence_lengths = jnp.clip(sequence_lengths, 1.0, None)
     
@@ -159,8 +159,8 @@ def eval_step(model, video, mask, gamma1, gamma2, max_compression_rate, hw, rngs
     mask = rearrange(mask, "b time -> b 1 1 time")
     mask = repeat(mask, "b 1 1 time -> b hw 1 1 time", hw = hw)
     mask = rearrange(mask, "b hw 1 1 time -> (b hw) 1 1 time")
-    loss, (MSE, selection_loss, kl_loss, reconstruction) = loss_fn(model, video, mask, gamma1, gamma2, 
-    max_compression_rate, original_mask, rngs)
+    loss, (MSE, selection_loss, kl_loss, reconstruction) = loss_fn(model, video, mask, gamma1, gamma2,
+    max_compression_rate, original_mask, rngs, train=False)
     return loss, MSE, selection_loss, kl_loss, reconstruction
 
 

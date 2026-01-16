@@ -240,11 +240,14 @@ class GumbelSigmoidSTE(nnx.Module):
     def __init__(self, temperature: float = 1.0):
         self.temperature = temperature
 
-    def __call__(self, logits: Array, rngs: nnx.Rngs) -> Array:
-        key = rngs.sampling()
-        eps = 1e-20
-        u = jax.random.uniform(key, logits.shape)
-        u = jnp.clip(u, eps, 1.0 - eps)
-        logistic_noise = jnp.log(u / (1-u))
-
-        return round_ste(jax.nn.sigmoid((logits + logistic_noise) / self.temperature))
+    def __call__(self, logits: Array, rngs: nnx.Rngs, train: bool = True) -> Array:
+        if train:
+            key = rngs.sampling()
+            eps = 1e-20
+            u = jax.random.uniform(key, logits.shape)
+            u = jnp.clip(u, eps, 1.0 - eps)
+            logistic_noise = jnp.log(u / (1-u))
+            return round_ste(jax.nn.sigmoid((logits + logistic_noise) / self.temperature))
+        else:
+            # Deterministic: just threshold at 0.5 (sigmoid(0) = 0.5)
+            return jnp.round(jax.nn.sigmoid(logits / self.temperature))

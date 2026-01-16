@@ -31,7 +31,7 @@ jit_forward = nnx.jit(vae.__call__)
 #jit_forward = vae.__call__
 reconstruction, _, selection, _, _ = jit_forward(input_image, input_mask, rngs = rng)
 print(reconstruction.shape, input_image.shape, selection.shape)
-
+exit()
 '''
 reconstruction, _, _ = jit_forward(input_image, input_mask, rngs = rng, deterministic = True)
 cut_input_image = input_image[:, :10, :, :, :]

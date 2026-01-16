@@ -100,17 +100,15 @@ def list_video_files(base_dir: str = "/mnt/t9/videos") -> List[str]:
     video_paths = []
     
     # Find all videos{i} directories
-    i = 0
-    while True:
+    for i in range(0, 100):
         dir_path = os.path.join(base_dir, f"videos{i}")
         if not os.path.isdir(dir_path):
-            break
+            continue
         
         # List all video files in this directory
         for filename in os.listdir(dir_path):
             if filename.endswith(('.mp4', '.avi', '.mov', '.mkv', '.webm')):
                 video_paths.append(os.path.join(dir_path, filename))
-        i += 1
     
     return video_paths
 
