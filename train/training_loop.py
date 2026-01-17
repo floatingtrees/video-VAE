@@ -129,7 +129,7 @@ def loss_fn(model: nnx.Module, video: Float[Array, "b time height width channels
     #jax.debug.print("log_var range: [{min:.3f}, {max:.3f}]", min=logvar.min(), max=logvar.max())
     #jax.debug.print("mean range: [{min:.3f}, {max:.3f}]", min=mean.min(), max=mean.max())       
                        
-    return loss, (MSE, selection_loss, kl_loss, reconstruction)
+    return loss, (MSE, selection_loss, kl_loss, reconstruction, kept_frame_density.mean())
 
 
 def find_first_nan_grad(grads):
@@ -147,21 +147,21 @@ def train_step(model, optimizer, video, mask, gamma1, gamma2, max_compression_ra
     mask = repeat(mask, "b 1 1 time -> b hw 1 1 time", hw = hw)
     mask = rearrange(mask, "b hw 1 1 time -> (b hw) 1 1 time")
     grad_fn = nnx.value_and_grad(loss_fn, has_aux=True)
-    (loss, (MSE, selection_loss, kl_loss, reconstruction)), grads = grad_fn(model, video, mask, gamma1, gamma2, 
+    (loss, (MSE, selection_loss, kl_loss, reconstruction, kept_frame_density)), grads = grad_fn(model, video, mask, gamma1, gamma2, 
     max_compression_rate, original_mask, rngs)
     #jax.debug.print("Max Gradient Value: {x:.6f}", x=print_max_grad(grads)) 
     optimizer.update(grads)
     
-    return loss, MSE, selection_loss, kl_loss, reconstruction
+    return loss, MSE, selection_loss, kl_loss, reconstruction, kept_frame_density
 
 def eval_step(model, video, mask, gamma1, gamma2, max_compression_rate, hw, rngs: nnx.Rngs):
     original_mask = mask.copy()
     mask = rearrange(mask, "b time -> b 1 1 time")
     mask = repeat(mask, "b 1 1 time -> b hw 1 1 time", hw = hw)
     mask = rearrange(mask, "b hw 1 1 time -> (b hw) 1 1 time")
-    loss, (MSE, selection_loss, kl_loss, reconstruction) = loss_fn(model, video, mask, gamma1, gamma2,
+    loss, (MSE, selection_loss, kl_loss, reconstruction, kept_frame_density) = loss_fn(model, video, mask, gamma1, gamma2,
     max_compression_rate, original_mask, rngs, train=False)
-    return loss, MSE, selection_loss, kl_loss, reconstruction
+    return loss, MSE, selection_loss, kl_loss, reconstruction, kept_frame_density
 
 
 
@@ -185,7 +185,7 @@ if __name__ == "__main__":
     patch_size = 16
     hw = height // patch_size * width // patch_size
     model = VideoVAE(height=height, width=width, channels=3, patch_size=patch_size, 
-        depth=6, mlp_dim=1536, num_heads=8, qkv_features=256,
+        depth=6, mlp_dim=1536, num_heads=8, qkv_features=512,
         max_temporal_len=MAX_FRAMES, spatial_compression_rate=4, unembedding_upsample_rate=4, rngs = nnx.Rngs(2))
 
     params = nnx.state(model, nnx.Param)
@@ -239,15 +239,15 @@ if __name__ == "__main__":
             )
 
         for i, batch in enumerate(train_dataloader):
-            if i > 115000 // BATCH_SIZE: # Dataloader doesn't natually terminate for some reason
+            if i > 425948 // BATCH_SIZE: # Dataloader doesn't natually terminate for some reason
                 break
-            max_compression_rate += 1e-5
+            max_compression_rate += 1e-4
             video = jax.device_put(batch["video"], device)
             mask = jax.device_put(batch["mask"], device)
             mask = mask.astype(jnp.bool)
             video = video.astype(jnp.bfloat16)
             
-            loss, MSE, selection_loss, kl_loss, reconstruction = jit_train_step(model, optimizer, video, mask, GAMMA1, GAMMA2, max_compression_rate, hw, rngs)                                  
+            loss, MSE, selection_loss, kl_loss, reconstruction, kept_frame_density = jit_train_step(model, optimizer, video, mask, GAMMA1, GAMMA2, max_compression_rate, hw, rngs)                                  
             if i % 1000 == 999:
                 recon_batch = {
                     "video": reconstruction,
@@ -261,16 +261,17 @@ if __name__ == "__main__":
                     "train_MSE": MSE,
                     "train_Selection Loss": selection_loss,
                     "train_KL Loss": kl_loss,
-                    "train_time": time.perf_counter() - start
+                    "train_time": time.perf_counter() - start, 
+                    "kept_frame_density": kept_frame_density
                 })
             else:
-                print(f"Epoch {epoch}, Step {i}: Loss = {float(loss):.4f}, MSE = {float(MSE):.4f}, Selection Loss = {float(selection_loss):.4f}, KL Loss = {float(kl_loss):.4f}, time = {time.perf_counter() - start:.4f}")
+                print(f"Epoch {epoch}, Step {i}: Loss = {float(loss):.4f}, MSE = {float(MSE):.4f}, Selection Loss = {float(selection_loss):.4f}, KL Loss = {float(kl_loss):.4f}, time = {time.perf_counter() - start:.4f}, kept_frame_density = {float(kept_frame_density):.4f}")
         save_checkpoint(model, optimizer, f"{model_save_path}/checkpoint_{epoch}")
         for i, batch in enumerate(test_dataloader):
             video = jax.device_put(batch["video"], device)
             mask = jax.device_put(batch["mask"], device)
             mask = mask.astype(jnp.bool)
-            loss, MSE, selection_loss, kl_loss, reconstruction = jit_eval_step(model, video, mask, GAMMA1, GAMMA2, max_compression_rate, hw, rngs)
+            loss, MSE, selection_loss, kl_loss, reconstruction, kept_frame_density = jit_eval_step(model, video, mask, GAMMA1, GAMMA2, max_compression_rate, hw, rngs)
             if i % 100 == 0:
                 recon_batch = {
                     "video": reconstruction,
@@ -284,7 +285,8 @@ if __name__ == "__main__":
                     "eval_MSE": MSE,
                     "eval_Selection Loss": selection_loss,
                     "eval_KL Loss": kl_loss,
-                    "eval_time": time.perf_counter() - start
+                    "eval_time": time.perf_counter() - start,
+                    "kept_frame_density": kept_frame_density
                 })
             else:
                 print(f"VALIDATION Epoch {epoch}, Step {i}: Loss = {float(loss):.4f}, MSE = {float(MSE):.4f}, Selection Loss = {float(selection_loss):.4f}, KL Loss = {float(kl_loss):.4f}")

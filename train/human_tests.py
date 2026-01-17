@@ -28,7 +28,7 @@ vae = VideoVAE(height=256, width=256, channels=3, patch_size=16,
     depth=6, mlp_dim=512, num_heads=8, qkv_features=128,
     max_temporal_len=temporal_length, spatial_compression_rate=4, unembedding_upsample_rate=1, rngs = nnx.Rngs(0))
 jit_forward = nnx.jit(vae.__call__)
-#jit_forward = vae.__call__
+jit_forward = vae.__call__
 reconstruction, _, selection, _, _ = jit_forward(input_image, input_mask, rngs = rng)
 print(reconstruction.shape, input_image.shape, selection.shape)
 exit()

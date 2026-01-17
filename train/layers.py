@@ -98,26 +98,26 @@ class RotaryEmbedding(nnx.Module):
 
         emb = jnp.concatenate((freqs, freqs), axis=-1)
 
-        self.cos_cached = nnx.Variable(jnp.cos(emb)[None, None, :, :])  # [1, 1, max_len, head_dim]
-        self.sin_cached = nnx.Variable(jnp.sin(emb)[None, None, :, :])  # [1, 1, max_len, head_dim]
+        self.cos_cached = nnx.Variable(jnp.cos(emb)[None, :, None, :])  # [1, 1, max_len, head_dim]
+        self.sin_cached = nnx.Variable(jnp.sin(emb)[None, :, None, :])  # [1, 1, max_len, head_dim]
 
     def rotate_queries_and_keys(self, q, k):
         """
         Args:
-            q, k: [Batch, Num_Heads, Seq_Len, Head_Dim]
+            q, k: [Batch, Seq_Len, Num_Heads, Head_Dim]
         """
-        seq_len = q.shape[2]
+        seq_len = q.shape[1]
 
         cos_slice = jax.lax.dynamic_slice(
             self.cos_cached.value,
             (0, 0, 0, 0),
-            (1, 1, seq_len, self.head_dim)
+            (1, seq_len, 1, self.head_dim)
         )
 
         sin_slice = jax.lax.dynamic_slice(
             self.sin_cached.value,
             (0, 0, 0, 0),
-            (1, 1, seq_len, self.head_dim)
+            (1, seq_len, 1, self.head_dim)
         )
 
         # Apply rotation - cast to same dtype as q/k
@@ -155,18 +155,18 @@ class Attention(nnx.Module):
         self.q_norm = nnx.LayerNorm(head_dim, dtype=dtype, param_dtype=param_dtype, rngs=rngs, use_bias=False)
         self.k_norm = nnx.LayerNorm(head_dim, dtype=dtype, param_dtype=param_dtype, rngs=rngs, use_bias=False)
 
-    def __call__(self, x: Float[Array, "a seq dim"], mask: Float[Array, "b time 1 1 "] = None): # a = hw * b or b * t
+    def __call__(self, x: Float[Array, "a seq dim"], mask: Float[Array, "b 1 1 time"] = None): # a = hw * b or b * t
         x = self.input_norm(x)
         q, k, v = jnp.split(self.qkv_projection(x), 3, axis = -1)
-        q = rearrange(q, "b seq (head dim) -> b head seq dim", head = self.num_heads)
-        k = rearrange(k, "b seq (head dim) -> b head seq dim", head = self.num_heads)
-        v = rearrange(v, "b seq (head dim) -> b head seq dim", head = self.num_heads)
+        q = rearrange(q, "b seq (head dim) -> b seq head dim", head = self.num_heads)
+        k = rearrange(k, "b seq (head dim) -> b seq head dim", head = self.num_heads)
+        v = rearrange(v, "b seq (head dim) -> b seq head dim", head = self.num_heads)
         q = self.q_norm(q)
         k = self.k_norm(k)
         q, k = self.ROPE.rotate_queries_and_keys(q, k)
 
         attn_output = jax.nn.dot_product_attention(q, k, v, mask = mask)
-        attn_output = rearrange(attn_output, "b head seq dim -> b seq (head dim)")
+        attn_output = rearrange(attn_output, "b seq head dim -> b seq (head dim)")
         attn_output = self.out_projection(attn_output)
         return attn_output
 
@@ -207,9 +207,8 @@ class FactoredAttention(nnx.Module):
         self.TemporalMLP = MLP(in_features, mlp_dim, rngs, dtype=dtype, param_dtype=param_dtype)
 
     @nnx.remat
-    def __call__(self, x: Float[Array, "b time hw channels"], temporal_mask: Float[Array, "b time 1 1 "]):
+    def __call__(self, x: Float[Array, "b time hw channels"], temporal_mask: Float[Array, "b 1 1 time"]):
         b, t, hw, c = x.shape
-
         temporal_x = rearrange(x, "b t hw c -> (b hw) t c")
         temporal_attn_output = self.TemporalAttention(temporal_x, mask = temporal_mask)
         temporal_x = temporal_x + temporal_attn_output
