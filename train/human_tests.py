@@ -6,9 +6,6 @@ from jaxtyping import jaxtyped, Float, Array
 from einops import rearrange, repeat
 
 #jax.config.update("jax_enable_x64", True)
-
-
-
 from model import Encoder, VideoVAE
 
 

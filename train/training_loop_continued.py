@@ -12,7 +12,7 @@ import wandb
 import time
 from jaxtyping import jaxtyped, Float, Array
 from einops import rearrange, repeat, reduce
-
+from model_loader import load_checkpoint
 
 
 import orbax.checkpoint as ocp
@@ -40,7 +40,7 @@ SHUFFLE = True
 NUM_WORKERS = 4
 PREFETCH_SIZE = 16
 DROP_REMAINDER = True
-SEED = 0
+SEED = 42
 import math
 DECAY_STEPS = 100_000
 GAMMA1 = 0.005 # If too low, the encoder used to drop all frames, but STE gating function should prevent that now
@@ -49,7 +49,7 @@ LEARNING_RATE = 5e-5
 WARMUP_STEPS = 20000 // math.sqrt(BATCH_SIZE)
 VIDEO_SAVE_DIR = "outputs"
 MAGNIFY_NEGATIVES_RATE = 100
-max_compression_rate = 2
+max_compression_rate = 3
 
 
 def save_checkpoint(model, optimizer, path):                                                                       
@@ -169,7 +169,6 @@ def eval_step(model, video, mask, gamma1, gamma2, max_compression_rate, hw, rngs
 
 
 
-
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Check for run flag.")
@@ -206,6 +205,7 @@ if __name__ == "__main__":
 
     optimizer = nnx.Optimizer(model, optimizer_def)
     #step_count = optimizer.opt_state.count
+    load_checkpoint(model, optimizer, f"/mnt/t9/vae_longterm_saves/crashed_from_dataloader_bug")
 
     rngs = nnx.Rngs(3)
     jit_train_step = nnx.jit(train_step, static_argnames = ("hw"))

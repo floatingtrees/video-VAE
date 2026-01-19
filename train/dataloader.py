@@ -166,72 +166,77 @@ def load_video(
             - video: array in shape (T, H, W, C) with values in [0, 1]
             - mask: boolean array in shape (T,) with 1 for real frames, 0 for padded
     """
-    cap = cv2.VideoCapture(path)
-    
-    if not cap.isOpened():
-        raise ValueError(f"Could not open video: {path}")
-    
-    frames = []
-    frame_count = 0
-    crop_params = None  # Will be set on first frame
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    start_frame = randint(0, max(total_frames - max_frames, 0))
-    counter = 0
-    while True:
-        ret, frame = cap.read()
-        if counter < start_frame:
-            counter += 1
-            continue
-        if max_frames is not None and frame_count >= max_frames:
-            break
+    try:
+        cap = cv2.VideoCapture(path)
+        
+        if not cap.isOpened():
+            raise ValueError(f"Could not open video: {path}")
+        
+        frames = []
+        frame_count = 0
+        crop_params = None  # Will be set on first frame
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        start_frame = randint(0, max(total_frames - max_frames, 0))
+        counter = 0
+        while True:
+            ret, frame = cap.read()
+            if counter < start_frame:
+                counter += 1
+                continue
+            if max_frames is not None and frame_count >= max_frames:
+                break
+                
             
+            if not ret:
+                break
+            
+            # Convert BGR to RGB
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # Compute random crop params on first frame (same crop for all frames)
+            if crop_params is None:
+                h, w = frame.shape[:2]
+                crop_params = get_random_crop_params(h, w, crop_size)
+            
+            # Apply random crop (same position for all frames)
+            frame = apply_crop(frame, crop_size, crop_params)
+            
+            # Resize if specified
+            if resize is not None:
+                h, w = resize
+                frame = cv2.resize(frame, (w, h))
+            
+            frames.append(frame)
+            frame_count += 1
         
-        if not ret:
-            break
+        cap.release()
         
-        # Convert BGR to RGB
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        if len(frames) == 0:
+            raise ValueError(f"No frames loaded from video: {path}")
         
-        # Compute random crop params on first frame (same crop for all frames)
-        if crop_params is None:
-            h, w = frame.shape[:2]
-            crop_params = get_random_crop_params(h, w, crop_size)
+        # Stack frames: (T, H, W, C)
+        video = np.stack(frames, axis=0)
         
-        # Apply random crop (same position for all frames)
-        frame = apply_crop(frame, crop_size, crop_params)
+        # Normalize to [0, 1]
+        video = video.astype(np.float32) / 255.0
         
-        # Resize if specified
-        if resize is not None:
-            h, w = resize
-            frame = cv2.resize(frame, (w, h))
+        num_real_frames = video.shape[0]
         
-        frames.append(frame)
-        frame_count += 1
-    
-    cap.release()
-    
-    if len(frames) == 0:
-        raise ValueError(f"No frames loaded from video: {path}")
-    
-    # Stack frames: (T, H, W, C)
-    video = np.stack(frames, axis=0)
-    
-    # Normalize to [0, 1]
-    video = video.astype(np.float32) / 255.0
-    
-    num_real_frames = video.shape[0]
-    
-    # Pad to max_frames if video is shorter
-    if max_frames is not None and video.shape[0] < max_frames:
-        pad_size = max_frames - video.shape[0]
-        padding = np.zeros((pad_size, *video.shape[1:]), dtype=np.float32)
-        video = np.concatenate([video, padding], axis=0)
-    
-    # Create mask: 1 for real frames, 0 for padded
-    total_frames = video.shape[0]
-    mask = np.zeros(total_frames, dtype=np.float32)
-    mask[:num_real_frames] = 1.0
-    
+        # Pad to max_frames if video is shorter
+        if max_frames is not None and video.shape[0] < max_frames:
+            pad_size = max_frames - video.shape[0]
+            padding = np.zeros((pad_size, *video.shape[1:]), dtype=np.float32)
+            video = np.concatenate([video, padding], axis=0)
+        
+        # Create mask: 1 for real frames, 0 for padded
+        total_frames = video.shape[0]
+        mask = np.zeros(total_frames, dtype=np.float32)
+        mask[:num_real_frames] = 1.0
+    except Exception as e:
+        print(e, path) 
+        h, w = resize
+        video = np.zeros((max_frames, h, w, 3), dtype = np.float32)
+        mask = np.ones(max_frames, dtype = np.float32)
     return video, mask
 
 

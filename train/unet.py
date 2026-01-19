@@ -2,18 +2,18 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from jaxtyping import Float, Array
-from einops import rearrange
 
 
-class ConvBlock(nnx.Module):
-    """Basic convolution block with norm and activation."""
+class ConvBlock3D(nnx.Module):
+    """3D convolution block with norm and activation for spatiotemporal processing."""
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int, rngs: nnx.Rngs,
+                 temporal_kernel: int = 3,
                  dtype: jnp.dtype = jnp.bfloat16, param_dtype: jnp.dtype = jnp.float32):
         super().__init__()
         self.conv = nnx.Conv(
             in_features=in_channels,
             out_features=out_channels,
-            kernel_size=(kernel_size, kernel_size),
+            kernel_size=(temporal_kernel, kernel_size, kernel_size),
             padding='SAME',
             dtype=dtype,
             param_dtype=param_dtype,
@@ -22,56 +22,59 @@ class ConvBlock(nnx.Module):
         self.norm = nnx.GroupNorm(num_groups=min(8, out_channels), num_features=out_channels,
                                    dtype=dtype, param_dtype=param_dtype, rngs=rngs)
 
-    
-    def __call__(self, x: Float[Array, "b h w c"]) -> Float[Array, "b h w c"]:
+
+    def __call__(self, x: Float[Array, "b t h w c"]) -> Float[Array, "b t h w c"]:
         x = self.conv(x)
         x = self.norm(x)
         x = nnx.silu(x)
         return x
 
 
-class DownBlock(nnx.Module):
-    """Downsampling block with two conv layers and max pooling."""
+class DownBlock3D(nnx.Module):
+    """3D downsampling block with two conv layers and spatiotemporal pooling."""
     def __init__(self, in_channels: int, out_channels: int, rngs: nnx.Rngs,
+                 temporal_kernel: int = 3,
                  dtype: jnp.dtype = jnp.bfloat16, param_dtype: jnp.dtype = jnp.float32):
         super().__init__()
-        self.conv1 = ConvBlock(in_channels, out_channels, kernel_size=3, rngs=rngs,
-                               dtype=dtype, param_dtype=param_dtype)
-        self.conv2 = ConvBlock(out_channels, out_channels, kernel_size=3, rngs=rngs,
-                               dtype=dtype, param_dtype=param_dtype)
+        self.conv1 = ConvBlock3D(in_channels, out_channels, kernel_size=3, rngs=rngs,
+                                 temporal_kernel=temporal_kernel, dtype=dtype, param_dtype=param_dtype)
+        self.conv2 = ConvBlock3D(out_channels, out_channels, kernel_size=3, rngs=rngs,
+                                 temporal_kernel=temporal_kernel, dtype=dtype, param_dtype=param_dtype)
+
     @nnx.remat
-    def __call__(self, x: Float[Array, "b h w c"]) -> tuple:
+    def __call__(self, x: Float[Array, "b t h w c"]) -> tuple:
         x = self.conv1(x)
         x = self.conv2(x)
         skip = x
-        # 2x2 max pooling for downsampling
-        x = nnx.max_pool(x, window_shape=(2, 2), strides=(2, 2))
+        # Spatial-only pooling (preserve temporal dimension)
+        x = nnx.max_pool(x, window_shape=(1, 2, 2), strides=(1, 2, 2))
         return x, skip
 
 
-class UpBlock(nnx.Module):
-    """Upsampling block with transposed conv and skip connection."""
+class UpBlock3D(nnx.Module):
+    """3D upsampling block with transposed conv and skip connection."""
     def __init__(self, in_channels: int, out_channels: int, rngs: nnx.Rngs,
+                 temporal_kernel: int = 3,
                  dtype: jnp.dtype = jnp.bfloat16, param_dtype: jnp.dtype = jnp.float32):
         super().__init__()
-        # Transposed conv for upsampling
+        # Transposed conv for spatial upsampling (preserve temporal dimension)
         self.upsample = nnx.ConvTranspose(
             in_features=in_channels,
             out_features=out_channels,
-            kernel_size=(2, 2),
-            strides=(2, 2),
+            kernel_size=(1, 2, 2),
+            strides=(1, 2, 2),
             dtype=dtype,
             param_dtype=param_dtype,
             rngs=rngs
         )
         # After concatenation with skip, we have out_channels * 2
-        self.conv1 = ConvBlock(out_channels * 2, out_channels, kernel_size=3, rngs=rngs,
-                               dtype=dtype, param_dtype=param_dtype)
-        self.conv2 = ConvBlock(out_channels, out_channels, kernel_size=3, rngs=rngs,
-                               dtype=dtype, param_dtype=param_dtype)
+        self.conv1 = ConvBlock3D(out_channels * 2, out_channels, kernel_size=3, rngs=rngs,
+                                 temporal_kernel=temporal_kernel, dtype=dtype, param_dtype=param_dtype)
+        self.conv2 = ConvBlock3D(out_channels, out_channels, kernel_size=3, rngs=rngs,
+                                 temporal_kernel=temporal_kernel, dtype=dtype, param_dtype=param_dtype)
 
     @nnx.remat
-    def __call__(self, x: Float[Array, "b h w c"], skip: Float[Array, "b h2 w2 c2"]) -> Float[Array, "b h2 w2 c2"]:
+    def __call__(self, x: Float[Array, "b t h w c"], skip: Float[Array, "b t h2 w2 c2"]) -> Float[Array, "b t h2 w2 c2"]:
         x = self.upsample(x)
         # Concatenate with skip connection
         x = jnp.concatenate([x, skip], axis=-1)
@@ -82,13 +85,13 @@ class UpBlock(nnx.Module):
 
 class UNet(nnx.Module):
     """
-    UNet model for removing patch edges from video VAE outputs.
+    3D UNet model for video processing with temporal convolutions.
 
     Takes input shape (b, t, height, width, channels) and outputs the same shape.
-    Uses kernels large enough to span multiple patches for smooth blending.
+    Uses 3D convolutions to capture spatiotemporal patterns across frames.
     """
     def __init__(self, channels: int, base_features: int = 32, num_levels: int = 3,
-                 out_features: int = 3, rngs: nnx.Rngs = None,
+                 out_features: int = 3, rngs: nnx.Rngs = None, temporal_kernel: int = 3,
                  dtype: jnp.dtype = jnp.bfloat16, param_dtype: jnp.dtype = jnp.float32):
         """
         Args:
@@ -97,58 +100,76 @@ class UNet(nnx.Module):
             num_levels: Number of encoder/decoder levels (downsampling/upsampling stages)
             out_features: Number of output channels
             rngs: Random number generators for initialization
+            temporal_kernel: Kernel size for temporal dimension (default 3)
             dtype: Computation dtype (default bfloat16)
             param_dtype: Parameter storage dtype (default float32)
         """
         super().__init__()
         self.num_levels = num_levels
         self.dtype = dtype
+        # 3D patch mixer with temporal awareness
         self.patch_mixer = nnx.Conv(in_features=channels, out_features=channels,
-                                    kernel_size=(7, 7), padding='SAME',
+                                    kernel_size=(temporal_kernel, 7, 7), padding='SAME',
                                     dtype=dtype, param_dtype=param_dtype, rngs=rngs)
         # Encoder path
         self.encoders = []
         in_ch = channels
         for i in range(num_levels):
             out_ch = base_features * (2 ** i)
-            self.encoders.append(DownBlock(in_ch, out_ch, rngs=rngs,
-                                           dtype=dtype, param_dtype=param_dtype))
+            self.encoders.append(DownBlock3D(in_ch, out_ch, rngs=rngs,
+                                             temporal_kernel=temporal_kernel,
+                                             dtype=dtype, param_dtype=param_dtype))
             in_ch = out_ch
 
         # Bottleneck
         bottleneck_ch = base_features * (2 ** num_levels)
-        self.bottleneck1 = ConvBlock(in_ch, bottleneck_ch, kernel_size=3, rngs=rngs,
-                                     dtype=dtype, param_dtype=param_dtype)
-        self.bottleneck2 = ConvBlock(bottleneck_ch, bottleneck_ch, kernel_size=3, rngs=rngs,
-                                     dtype=dtype, param_dtype=param_dtype)
+        self.bottleneck1 = ConvBlock3D(in_ch, bottleneck_ch, kernel_size=3, rngs=rngs,
+                                       temporal_kernel=temporal_kernel,
+                                       dtype=dtype, param_dtype=param_dtype)
+        self.bottleneck2 = ConvBlock3D(bottleneck_ch, bottleneck_ch, kernel_size=3, rngs=rngs,
+                                       temporal_kernel=temporal_kernel,
+                                       dtype=dtype, param_dtype=param_dtype)
 
         # Decoder path (reverse order of encoder)
         self.decoders = []
         in_ch = bottleneck_ch
         for i in range(num_levels - 1, -1, -1):
             out_ch = base_features * (2 ** i)
-            self.decoders.append(UpBlock(in_ch, out_ch, rngs=rngs,
-                                         dtype=dtype, param_dtype=param_dtype))
+            self.decoders.append(UpBlock3D(in_ch, out_ch, rngs=rngs,
+                                           temporal_kernel=temporal_kernel,
+                                           dtype=dtype, param_dtype=param_dtype))
             in_ch = out_ch
 
         # Final output conv (no activation, we want clean output)
         self.final_conv = nnx.Conv(
             in_features=base_features,
             out_features=out_features,
-            kernel_size=(1, 1),
+            kernel_size=(1, 1, 1),
             padding='SAME',
             dtype=dtype,
-            kernel_init = nnx.initializers.zeros,
+            kernel_init=nnx.initializers.zeros,
             param_dtype=param_dtype,
             rngs=rngs
         )
 
+    def __call__(self, x: Float[Array, "b time height width channels"]) -> Float[Array, "b time height width channels"]:
+        """
+        Process video input through 3D UNet.
 
-    def process_frame(self, x: Float[Array, "b h w c"]) -> Float[Array, "b h w c"]:
-        """Process a single frame through the UNet."""
+        Args:
+            x: Input tensor of shape (b, t, h, w, c)
+
+        Returns:
+            Output tensor of shape (b, t, h, w, c) with temporal coherence
+        """
+        # Cast to computation dtype
+        x = x.astype(self.dtype)
+
+        # Initial mixing with temporal context
+        x = self.patch_mixer(x)
+
         # Encoder - collect skip connections
         skips = []
-        x = self.patch_mixer(x)
         for encoder in self.encoders:
             x, skip = encoder(x)
             skips.append(skip)
@@ -163,31 +184,6 @@ class UNet(nnx.Module):
 
         # Final projection
         x = self.final_conv(x)
-        return x
-
-    def __call__(self, x: Float[Array, "b time height width channels"]) -> Float[Array, "b time height width channels"]:
-        """
-        Process video input through UNet.
-
-        Args:
-            x: Input tensor of shape (b, t, h, w, c)
-
-        Returns:
-            Output tensor of shape (b, t, h, w, c) with smoothed patch boundaries
-        """
-        b, t, h, w, c = x.shape
-
-        # Flatten batch and time for processing
-        x = rearrange(x, "b t h w c -> (b t) h w c")
-
-        # Cast to computation dtype
-        x = x.astype(self.dtype)
-
-        # Process through UNet
-        x = self.process_frame(x)
-
-        # Reshape back to video format
-        x = rearrange(x, "(b t) h w c -> b t h w c", b=b, t=t)
 
         return x
 
@@ -207,9 +203,9 @@ if __name__ == "__main__":
 
     input_video = jax.random.normal(key, (batch_size, temporal_length, height, width, channels)) * 0.02
 
-    # Create UNet with configurable depth and mixed precision
+    # Create 3D UNet with configurable depth and mixed precision
     unet = UNet(channels=channels, base_features=32, num_levels=3, rngs=rngs,
-                dtype=jnp.bfloat16, param_dtype=jnp.float32)
+                temporal_kernel=3, dtype=jnp.bfloat16, param_dtype=jnp.float32)
 
     # JIT compile
     jit_forward = nnx.jit(unet.__call__)
