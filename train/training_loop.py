@@ -12,7 +12,7 @@ import wandb
 import time
 from jaxtyping import jaxtyped, Float, Array
 from einops import rearrange, repeat, reduce
-
+from model_loader import load_checkpoint
 
 
 import orbax.checkpoint as ocp
@@ -43,7 +43,7 @@ DROP_REMAINDER = True
 SEED = 0
 import math
 DECAY_STEPS = 100_000
-GAMMA1 = 0.005 # If too low, the encoder used to drop all frames, but STE gating function should prevent that now
+GAMMA1 = 0.05 # If too low, the encoder used to drop all frames, but STE gating function should prevent that now
 GAMMA2 = 0.001
 LEARNING_RATE = 5e-5
 WARMUP_STEPS = 20000 // math.sqrt(BATCH_SIZE)
@@ -186,8 +186,8 @@ if __name__ == "__main__":
     patch_size = 16
     hw = height // patch_size * width // patch_size
     model = VideoVAE(height=height, width=width, channels=3, patch_size=patch_size, 
-        depth=6, mlp_dim=1536, num_heads=8, qkv_features=512,
-        max_temporal_len=64, spatial_compression_rate=4, unembedding_upsample_rate=4, rngs = nnx.Rngs(2))
+        encoder_depth=9, decoder_depth=12, mlp_dim=1536, num_heads=8, qkv_features=512,
+        max_temporal_len=64, spatial_compression_rate=8, unembedding_upsample_rate=4, rngs = nnx.Rngs(2))
 
     params = nnx.state(model, nnx.Param)
     num_params = sum(x.size for x in jax.tree_util.tree_leaves(params))
@@ -217,7 +217,7 @@ if __name__ == "__main__":
         os.makedirs(os.path.join(VIDEO_SAVE_DIR, f"train/epoch{epoch}"), exist_ok=True)
         os.makedirs(os.path.join(VIDEO_SAVE_DIR, f"eval/epoch{epoch}"), exist_ok=True)
         max_frames = 64
-        min_batch_size = 8
+        min_batch_size = 4
         max_epoch_multiplier = min(                                                                                        
             int(math.log2(BATCH_SIZE / min_batch_size)),      # from batch constraint: 2                                   
             int(math.log2(max_frames / MAX_FRAMES)) - 1       # from frame constraint (<64): 2                             

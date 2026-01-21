@@ -33,8 +33,8 @@ def reset_directory(path):
 
 
 NUM_EPOCHS = 100
-BATCH_SIZE = 32
-MAX_FRAMES = 8
+BATCH_SIZE = 4
+MAX_FRAMES = 64
 RESIZE = (256, 256)
 SHUFFLE = True
 NUM_WORKERS = 4
@@ -43,13 +43,13 @@ DROP_REMAINDER = True
 SEED = 42
 import math
 DECAY_STEPS = 100_000
-GAMMA1 = 0.005 # If too low, the encoder used to drop all frames, but STE gating function should prevent that now
+GAMMA1 = 0.05 # If too low, the encoder used to drop all frames
 GAMMA2 = 0.001
-LEARNING_RATE = 5e-5
-WARMUP_STEPS = 20000 // math.sqrt(BATCH_SIZE)
+LEARNING_RATE = 2e-5
+WARMUP_STEPS = 10000 // math.sqrt(BATCH_SIZE)
 VIDEO_SAVE_DIR = "outputs"
 MAGNIFY_NEGATIVES_RATE = 100
-max_compression_rate = 3
+max_compression_rate = 10000
 
 
 def save_checkpoint(model, optimizer, path):                                                                       
@@ -205,7 +205,7 @@ if __name__ == "__main__":
 
     optimizer = nnx.Optimizer(model, optimizer_def)
     #step_count = optimizer.opt_state.count
-    load_checkpoint(model, optimizer, f"/mnt/t9/vae_longterm_saves/crashed_from_dataloader_bug")
+    load_checkpoint(model, optimizer, f"/mnt/t9/vae_longterm_saves/higher_compression_ratio")
 
     rngs = nnx.Rngs(3)
     jit_train_step = nnx.jit(train_step, static_argnames = ("hw"))
@@ -217,7 +217,7 @@ if __name__ == "__main__":
         os.makedirs(os.path.join(VIDEO_SAVE_DIR, f"train/epoch{epoch}"), exist_ok=True)
         os.makedirs(os.path.join(VIDEO_SAVE_DIR, f"eval/epoch{epoch}"), exist_ok=True)
         max_frames = 64
-        min_batch_size = 8
+        min_batch_size = 4
         max_epoch_multiplier = min(                                                                                        
             int(math.log2(BATCH_SIZE / min_batch_size)),      # from batch constraint: 2                                   
             int(math.log2(max_frames / MAX_FRAMES)) - 1       # from frame constraint (<64): 2                             

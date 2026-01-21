@@ -99,16 +99,16 @@ class Decoder(nnx.Module):
 
 
 class VideoVAE(nnx.Module):
-    def __init__(self, height, width, channels, patch_size, depth,
+    def __init__(self, height, width, channels, patch_size, encoder_depth, decoder_depth,
     mlp_dim, num_heads, qkv_features, max_temporal_len,
     spatial_compression_rate, unembedding_upsample_rate, rngs: nnx.Rngs,
     dtype: jnp.dtype = jnp.bfloat16, param_dtype: jnp.dtype = jnp.float32):
         key = rngs.sampling()
         super().__init__()
-        self.encoder = Encoder(height, width, channels, patch_size, depth,
+        self.encoder = Encoder(height, width, channels, patch_size, encoder_depth,
             mlp_dim, num_heads, qkv_features, max_temporal_len,
             spatial_compression_rate, rngs, dtype=dtype, param_dtype=param_dtype)
-        self.decoder = Decoder(height, width, channels, patch_size, depth,
+        self.decoder = Decoder(height, width, channels, patch_size, decoder_depth,
             mlp_dim, num_heads, qkv_features, max_temporal_len,
             spatial_compression_rate, unembedding_upsample_rate, rngs,
             dtype=dtype, param_dtype=param_dtype)

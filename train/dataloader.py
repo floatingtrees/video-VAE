@@ -426,11 +426,11 @@ if __name__ == "__main__":
     
     # Example usage with Grain dataloader
     dataloader = create_dataloader(
-        batch_size=4,
-        max_frames=4,
+        batch_size=1,
+        max_frames=1024,
         resize=(256, 256),
         shuffle=True,
-        num_workers=16,
+        num_workers=0,
         prefetch_size=2,
         seed=10
     )
@@ -439,9 +439,7 @@ if __name__ == "__main__":
     device = jax.devices()[0]
     
     for i, batch in enumerate(dataloader):
-        if i % 1000 == 0:
-            print(i)
-        continue
+
         # Transfer to GPU
         video = jax.device_put(batch["video"], device)
         mask = jax.device_put(batch["mask"], device)
@@ -454,7 +452,7 @@ if __name__ == "__main__":
         if i == 1:
             batch_to_video(batch, os.path.join(output_dir, "sample_unbatched.mp4"), fps=30.0)
         
-        if i >= 2:
+        if i >= 200:
             break
     
     print("\nTesting batched Grain dataloader...")
