@@ -42,13 +42,14 @@ PREFETCH_SIZE = 16
 DROP_REMAINDER = True
 SEED = 0
 import math
-DECAY_STEPS = 100_000
+DECAY_STEPS = 1_000_000
 GAMMA1 = 0.05 # If too low, the encoder used to drop all frames, but STE gating function should prevent that now
 GAMMA2 = 0.001
 LEARNING_RATE = 5e-5
 WARMUP_STEPS = 20000 // math.sqrt(BATCH_SIZE)
 VIDEO_SAVE_DIR = "outputs"
 MAGNIFY_NEGATIVES_RATE = 100
+DISCRIMINATOR_TRAINING_STEPS = 1000
 max_compression_rate = 2
 
 
@@ -174,6 +175,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Check for run flag.")
     parser.add_argument("--run", action="store_true", help="Set the run flag to True")
+    parser.add_argument("--model_path", type=str, default=None, help="Path to load model/optimizer checkpoint from")
     args = parser.parse_args()
     is_running = args.run
     TRAINING_RUN = is_running
@@ -207,12 +209,18 @@ if __name__ == "__main__":
     optimizer = nnx.Optimizer(model, optimizer_def)
     #step_count = optimizer.opt_state.count
 
+    if args.model_path is not None:
+        load_checkpoint(model, optimizer, args.model_path)
+        max_compression_rate = 100000
+        SEED = 42
+
     rngs = nnx.Rngs(3)
     jit_train_step = nnx.jit(train_step, static_argnames = ("hw"))
     jit_eval_step = nnx.jit(eval_step, static_argnames = ("hw"))
     device = jax.devices()[0]
     start = time.perf_counter()
-
+    os.makedirs(os.path.join(VIDEO_SAVE_DIR, f"train"), exist_ok=True)
+    os.makedirs(os.path.join(VIDEO_SAVE_DIR, f"eval"), exist_ok=True)
     for epoch in range(NUM_EPOCHS):
         os.makedirs(os.path.join(VIDEO_SAVE_DIR, f"train/epoch{epoch}"), exist_ok=True)
         os.makedirs(os.path.join(VIDEO_SAVE_DIR, f"eval/epoch{epoch}"), exist_ok=True)
