@@ -9,6 +9,7 @@ from jaxtyping import jaxtyped, Float, Array
 from layers import PatchEmbedding, FactoredAttention, GumbelSigmoidSTE, PatchUnEmbedding
 from einops import rearrange
 from unet import UNet
+from classifier import Classifier
 
 
 class Encoder(nnx.Module):
@@ -113,6 +114,7 @@ class VideoVAE(nnx.Module):
             spatial_compression_rate, unembedding_upsample_rate, rngs,
             dtype=dtype, param_dtype=param_dtype)
         self.fill_token = nnx.Param(jax.random.normal(key, (1, 1, 1, channels * patch_size * patch_size // spatial_compression_rate)) * 0.02, trainable = True)
+        
 
 
     def __call__(self, x: Float[Array, "b time height width channels"], mask: Float[Array, "b time 1 1"], rngs: nnx.Rngs, train: bool = True):

@@ -13,6 +13,7 @@ import time
 from jaxtyping import jaxtyped, Float, Array
 from einops import rearrange, repeat, reduce
 from model_loader import load_checkpoint
+from classifier import Classifier
 
 
 import orbax.checkpoint as ocp
@@ -49,14 +50,17 @@ LEARNING_RATE = 5e-5
 WARMUP_STEPS = 20000 // math.sqrt(BATCH_SIZE)
 VIDEO_SAVE_DIR = "outputs"
 MAGNIFY_NEGATIVES_RATE = 100
-DISCRIMINATOR_TRAINING_STEPS = 1000
+DISCRIMINATOR_TRAINING_STEPS = 2000
+DISCRIMINATOR_WEIGHT = 0.1
 max_compression_rate = 2
 
 
-def save_checkpoint(model, optimizer, path):                                                                       
+def save_checkpoint(model, optimizer, discriminator, discriminator_optimizer, path):                                                                       
       state = {                                                                                                      
           "model": nnx.state(model),                                                                                 
-          "optimizer": nnx.state(optimizer)                                                                          
+          "optimizer": nnx.state(optimizer),     
+          "discriminator": nnx.state(discriminator),
+          "discriminator_optimizer": nnx.state(discriminator_optimizer)
       }                                                                                                              
       ocp.StandardCheckpointer().save(path, state)                                                        
 
@@ -86,24 +90,19 @@ def print_max_grad(grads):
     
     return global_max
 
-def loss_fn(model: nnx.Module, video: Float[Array, "b time height width channels"],
-    mask: Float[Array, "b 1 1 time"], gamma1: float, gamma2: float, max_compression_rate: float,
-    original_mask: Float[Array, "b time"],
-    rngs: nnx.Rngs, MAGNIFY_NEGATIVES_RATE: float, train: bool = True):
+def loss_fn(model: nnx.Module, discriminator: nnx.Module, video: Float[Array, "b time height width channels"],
+    mask: Float[Array, "b 1 1 time"], original_mask: Float[Array, "b time"],
+    rngs: nnx.Rngs, hparams: dict, train: bool = True):
     reconstruction, compressed_representation, selection, logvar, mean = model(video, mask, rngs, train=train)
     sequence_lengths = reduce(original_mask, "b time -> b 1", "sum")
     sequence_lengths = jnp.clip(sequence_lengths, 1.0, None)
-    
-    
-
 
     video_shaped_mask = rearrange(original_mask, "b time -> b time 1 1 1")
     masked_squared_error = jnp.square((video - reconstruction) * video_shaped_mask)
     sequence_lengths_reshaped = rearrange(sequence_lengths, "b 1 -> b 1 1 1 1")
-    
+
     frame_reduced_error = reduce(masked_squared_error, "b time h w c -> b 1 h w c", "sum") / sequence_lengths_reshaped
     MSE = jnp.mean(frame_reduced_error)
-    
 
     kl_and_selection_mask = rearrange(original_mask, "b time -> b time 1 1")
 
@@ -111,59 +110,62 @@ def loss_fn(model: nnx.Module, video: Float[Array, "b time height width channels
 
     # Kept frame density high -> lots of kept frames
     kept_frame_density = selection_sum / sequence_lengths
-    # This is kind of weird 
+    # This is kind of weird
     # The idea is that we want to keep the frame density as close to 1 / max_compression_rate as possible
-    # Alternatively, we can lower bound kept_frame_density - (1 / max_compression_rate) 
+    # Alternatively, we can lower bound kept_frame_density - (1 / max_compression_rate)
     # But this runs into starvation risks if the encoder takes too long to reduce MSE
-    
-    density_compression_difference = kept_frame_density - (1 / max_compression_rate)
+
+    density_compression_difference = kept_frame_density - (1 / hparams["max_compression_rate"])
     # We want kept_frame_density > max_compression_rate to prevent dropping all frames, so we magnify negatives
-    selection_loss = jnp.mean(jnp.square(magnify_negatives(density_compression_difference, MAGNIFY_NEGATIVES_RATE)))
+    selection_loss = jnp.mean(jnp.square(magnify_negatives(density_compression_difference, hparams["magnify_negatives_rate"])))
 
+    _, (accuracy, discriminator_preds, discriminator_labels) = discriminator_loss_fn(discriminator, video, reconstruction, mask, rngs, train=train)
+    discriminator_loss = optax.sigmoid_binary_cross_entropy(discriminator_preds, 1 - discriminator_labels).mean()
 
-    
     sequence_lengths_reshaped = rearrange(sequence_lengths, "b 1 -> b 1 1 1")
     kl_loss = 0.5 * (jnp.exp(logvar) - 1 - logvar + jnp.square(mean)) * kl_and_selection_mask / sequence_lengths_reshaped
     kl_loss = jnp.mean(kl_loss)
-    loss = MSE + gamma1 * selection_loss + gamma2 * kl_loss      
-    #jax.debug.print("Input range: [{min:.3f}, {max:.3f}]", min=video.min(), max=video.max())
-    #jax.debug.print("Recon range: [{min:.3f}, {max:.3f}]", min=reconstruction.min(), max=reconstruction.max())
-    #jax.debug.print("log_var range: [{min:.3f}, {max:.3f}]", min=logvar.min(), max=logvar.max())
-    #jax.debug.print("mean range: [{min:.3f}, {max:.3f}]", min=mean.min(), max=mean.max())       
-                       
-    return loss, (MSE, selection_loss, kl_loss, reconstruction, kept_frame_density.mean())
+    loss = MSE + hparams["gamma1"] * selection_loss + hparams["gamma2"] * kl_loss + hparams["discriminator_weight"] * discriminator_loss
 
+    return loss, (MSE, selection_loss, kl_loss, reconstruction, kept_frame_density.mean(), accuracy)
 
-def find_first_nan_grad(grads):
-    def check(path, leaf):
-        if jnp.isnan(leaf).any():
-            print(f"❌ NaN Gradient in: {jax.tree_util.keystr(path)}")
-            # Print range to see if it's overflowing
-            print(f"   Range: [{jnp.min(leaf)}, {jnp.max(leaf)}]")
-    
-    jax.tree_util.tree_map_with_path(check, grads)
+def discriminator_loss_fn(discriminator: nnx.Module, video: Float[Array, "b time height width channels"],
+    reconstruction: Float[Array, "b time height width channels"],
+    mask: Float[Array, "b 1 1 time"], rngs: nnx.Rngs, train: bool = True):
+    discriminator_mask = jnp.concatenate([mask, mask], axis = 0)
+    discriminator_input = jnp.concatenate([video, reconstruction], axis = 0)
+    # 1 for real, 0 for fake
+    discriminator_labels = jnp.concatenate([jnp.ones(video.shape[0]), jnp.zeros(video.shape[0])], axis = 0)
+    discriminator_output = discriminator(discriminator_input, discriminator_mask, rngs, train=train)
+    discriminator_loss = optax.sigmoid_binary_cross_entropy(discriminator_output, discriminator_labels).mean()
+    binary_preds = jnp.round(jax.nn.sigmoid(discriminator_output))
+    accuracy = jnp.mean(binary_preds == discriminator_labels)
+    return discriminator_loss, (accuracy, discriminator_output, discriminator_labels)
 
-def train_step(model, optimizer, video, mask, gamma1, gamma2, max_compression_rate, hw, rngs: nnx.Rngs, MAGNIFY_NEGATIVES_RATE: float):
+def train_step(model, optimizer, discriminator, discriminator_optimizer, video, mask, hparams: dict, hw: int, rngs: nnx.Rngs):
     original_mask = mask.copy()
     mask = rearrange(mask, "b time -> b 1 1 time")
-    mask = repeat(mask, "b 1 1 time -> b hw 1 1 time", hw = hw)
+    mask = repeat(mask, "b 1 1 time -> b hw 1 1 time", hw=hw)
     mask = rearrange(mask, "b hw 1 1 time -> (b hw) 1 1 time")
     grad_fn = nnx.value_and_grad(loss_fn, has_aux=True)
-    (loss, (MSE, selection_loss, kl_loss, reconstruction, kept_frame_density)), grads = grad_fn(model, video, mask, gamma1, gamma2, 
-    max_compression_rate, original_mask, rngs, MAGNIFY_NEGATIVES_RATE=MAGNIFY_NEGATIVES_RATE)
-    #jax.debug.print("Max Gradient Value: {x:.6f}", x=print_max_grad(grads)) 
+    (loss, (MSE, selection_loss, kl_loss, reconstruction, kept_frame_density, accuracy)), grads = grad_fn(
+        model, discriminator, video, mask, original_mask, rngs, hparams)
     optimizer.update(grads)
-    
-    return loss, MSE, selection_loss, kl_loss, reconstruction, kept_frame_density
+    discriminator_grad_fn = nnx.value_and_grad(discriminator_loss_fn, has_aux=True)
+    (discriminator_loss, (accuracy, discriminator_preds, discriminator_labels)), discriminator_grads = discriminator_grad_fn(
+        discriminator, video, reconstruction, mask, rngs, train=True)
+    discriminator_optimizer.update(discriminator_grads)
 
-def eval_step(model, video, mask, gamma1, gamma2, max_compression_rate, hw, rngs: nnx.Rngs, MAGNIFY_NEGATIVES_RATE: float):
+    return loss, MSE, selection_loss, kl_loss, reconstruction, kept_frame_density, accuracy, discriminator_loss
+
+def eval_step(model, discriminator, video, mask, hparams: dict, hw: int, rngs: nnx.Rngs):
     original_mask = mask.copy()
     mask = rearrange(mask, "b time -> b 1 1 time")
-    mask = repeat(mask, "b 1 1 time -> b hw 1 1 time", hw = hw)
+    mask = repeat(mask, "b 1 1 time -> b hw 1 1 time", hw=hw)
     mask = rearrange(mask, "b hw 1 1 time -> (b hw) 1 1 time")
-    loss, (MSE, selection_loss, kl_loss, reconstruction, kept_frame_density) = loss_fn(model, video, mask, gamma1, gamma2,
-    max_compression_rate, original_mask, rngs, MAGNIFY_NEGATIVES_RATE=MAGNIFY_NEGATIVES_RATE, train=False)
-    return loss, MSE, selection_loss, kl_loss, reconstruction, kept_frame_density
+    loss, (MSE, selection_loss, kl_loss, reconstruction, kept_frame_density, accuracy) = loss_fn(
+        model, discriminator, video, mask, original_mask, rngs, hparams, train=False)
+    return loss, MSE, selection_loss, kl_loss, reconstruction, kept_frame_density, accuracy
 
 
 
@@ -190,8 +192,10 @@ if __name__ == "__main__":
     model = VideoVAE(height=height, width=width, channels=3, patch_size=patch_size, 
         encoder_depth=9, decoder_depth=12, mlp_dim=1536, num_heads=8, qkv_features=512,
         max_temporal_len=64, spatial_compression_rate=8, unembedding_upsample_rate=4, rngs = nnx.Rngs(2))
-
+    discriminator = Classifier(height, width, 3, patch_size, depth = 3, mlp_dim = 1536, num_heads = 8, 
+    qkv_features = 512, max_temporal_len = 64, rngs = nnx.Rngs(3))
     params = nnx.state(model, nnx.Param)
+    
     num_params = sum(x.size for x in jax.tree_util.tree_leaves(params))
     print(f"Trainable Parameters: {num_params / 10**6} Million")
     schedule_fn= optax.warmup_cosine_decay_schedule(
@@ -207,16 +211,25 @@ if __name__ == "__main__":
     )
 
     optimizer = nnx.Optimizer(model, optimizer_def)
+    discriminator_optimizer = nnx.Optimizer(discriminator, optimizer_def)
     #step_count = optimizer.opt_state.count
+
+    hparams = {
+        "gamma1": GAMMA1,
+        "gamma2": GAMMA2,
+        "discriminator_weight": 0,
+        "max_compression_rate": max_compression_rate,
+        "magnify_negatives_rate": MAGNIFY_NEGATIVES_RATE,
+    }
 
     if args.model_path is not None:
         load_checkpoint(model, optimizer, args.model_path)
-        max_compression_rate = 100000
+        hparams["max_compression_rate"] = 100000
         SEED = 42
 
     rngs = nnx.Rngs(3)
-    jit_train_step = nnx.jit(train_step, static_argnames = ("hw"))
-    jit_eval_step = nnx.jit(eval_step, static_argnames = ("hw"))
+    jit_train_step = nnx.jit(train_step, static_argnames=("hw",))
+    jit_eval_step = nnx.jit(eval_step, static_argnames=("hw",))
     device = jax.devices()[0]
     start = time.perf_counter()
     os.makedirs(os.path.join(VIDEO_SAVE_DIR, f"train"), exist_ok=True)
@@ -260,13 +273,16 @@ if __name__ == "__main__":
         for i, batch in enumerate(train_dataloader):
             if i > 425948 // effective_batch_size: # Dataloader doesn't natually terminate for some reason
                 break
-            max_compression_rate += compression_rate_increment
+            if i > DISCRIMINATOR_TRAINING_STEPS:
+                hparams["discriminator_weight"] = DISCRIMINATOR_WEIGHT
+                hparams["max_compression_rate"] = 20000
             video = jax.device_put(batch["video"], device)
             mask = jax.device_put(batch["mask"], device)
             mask = mask.astype(jnp.bool)
             video = video.astype(jnp.bfloat16)
-            
-            loss, MSE, selection_loss, kl_loss, reconstruction, kept_frame_density = jit_train_step(model, optimizer, video, mask, GAMMA1, GAMMA2, max_compression_rate, hw, rngs, MAGNIFY_NEGATIVES_RATE=MAGNIFY_NEGATIVES_RATE)                                  
+
+            loss, MSE, selection_loss, kl_loss, reconstruction, kept_frame_density, accuracy, discriminator_loss = jit_train_step(
+                model, optimizer, discriminator, discriminator_optimizer, video, mask, hparams, hw, rngs)                                  
             if i % 1000 == 999:
                 recon_batch = {
                     "video": reconstruction,
@@ -283,17 +299,20 @@ if __name__ == "__main__":
                     "train_time": time.perf_counter() - start, 
                     "kept_frame_density": kept_frame_density, 
                     "effective_batch_size": effective_batch_size,
-                    "effective_max_frames": effective_max_frames
+                    "effective_max_frames": effective_max_frames, 
+                    "accuracy": accuracy,
+                    "discriminator_loss": discriminator_loss
                 })
             else:
                 print(f"Epoch {epoch}, Step {i}: Loss = {float(loss):.4f}, MSE = {float(MSE):.4f}, Selection Loss = {float(selection_loss):.4f}, KL Loss = {float(kl_loss):.4f}, time = {time.perf_counter() - start:.4f}, kept_frame_density = {float(kept_frame_density):.4f}, effective_batch_size = {effective_batch_size}, effective_max_frames = {effective_max_frames}")
-        save_checkpoint(model, optimizer, f"{model_save_path}/checkpoint_{epoch}")
+        save_checkpoint(model, optimizer, discriminator, discriminator_optimizer, f"{model_save_path}/checkpoint_{epoch}")
         
         for i, batch in enumerate(test_dataloader):
             video = jax.device_put(batch["video"], device)
             mask = jax.device_put(batch["mask"], device)
             mask = mask.astype(jnp.bool)
-            loss, MSE, selection_loss, kl_loss, reconstruction, kept_frame_density = jit_eval_step(model, video, mask, GAMMA1, GAMMA2, max_compression_rate, hw, rngs, MAGNIFY_NEGATIVES_RATE=MAGNIFY_NEGATIVES_RATE)
+            loss, MSE, selection_loss, kl_loss, reconstruction, kept_frame_density, accuracy = jit_eval_step(
+                model, discriminator, video, mask, hparams, hw, rngs)
             if i % 100 == 0:
                 recon_batch = {
                     "video": reconstruction,
