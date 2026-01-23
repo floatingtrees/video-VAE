@@ -5,7 +5,7 @@ import numpy as np
 from typing import Optional, List, Tuple, Dict, Union
 import cv2
 import grain.python as grain
-
+from random import randint
 
 def batch_to_video(
     batch: Dict[str, Union[np.ndarray, jnp.ndarray]],
@@ -38,6 +38,7 @@ def batch_to_video(
     
     video = batch["video"]
     mask = batch["mask"]
+    video = jnp.clip(video, 0, 1)
     
     # Convert JAX arrays to numpy
     if hasattr(video, "device"):
@@ -99,17 +100,15 @@ def list_video_files(base_dir: str = "/mnt/t9/videos") -> List[str]:
     video_paths = []
     
     # Find all videos{i} directories
-    i = 0
-    while True:
+    for i in range(0, 100):
         dir_path = os.path.join(base_dir, f"videos{i}")
         if not os.path.isdir(dir_path):
-            break
+            continue
         
         # List all video files in this directory
         for filename in os.listdir(dir_path):
             if filename.endswith(('.mp4', '.avi', '.mov', '.mkv', '.webm')):
                 video_paths.append(os.path.join(dir_path, filename))
-        i += 1
     
     return video_paths
 
@@ -167,66 +166,77 @@ def load_video(
             - video: array in shape (T, H, W, C) with values in [0, 1]
             - mask: boolean array in shape (T,) with 1 for real frames, 0 for padded
     """
-    cap = cv2.VideoCapture(path)
-    
-    if not cap.isOpened():
-        raise ValueError(f"Could not open video: {path}")
-    
-    frames = []
-    frame_count = 0
-    crop_params = None  # Will be set on first frame
-    
-    while True:
-        if max_frames is not None and frame_count >= max_frames:
-            break
+    try:
+        cap = cv2.VideoCapture(path)
+        
+        if not cap.isOpened():
+            raise ValueError(f"Could not open video: {path}")
+        
+        frames = []
+        frame_count = 0
+        crop_params = None  # Will be set on first frame
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        start_frame = randint(0, max(total_frames - max_frames, 0))
+        counter = 0
+        while True:
+            ret, frame = cap.read()
+            if counter < start_frame:
+                counter += 1
+                continue
+            if max_frames is not None and frame_count >= max_frames:
+                break
+                
             
-        ret, frame = cap.read()
-        if not ret:
-            break
+            if not ret:
+                break
+            
+            # Convert BGR to RGB
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # Compute random crop params on first frame (same crop for all frames)
+            if crop_params is None:
+                h, w = frame.shape[:2]
+                crop_params = get_random_crop_params(h, w, crop_size)
+            
+            # Apply random crop (same position for all frames)
+            frame = apply_crop(frame, crop_size, crop_params)
+            
+            # Resize if specified
+            if resize is not None:
+                h, w = resize
+                frame = cv2.resize(frame, (w, h))
+            
+            frames.append(frame)
+            frame_count += 1
         
-        # Convert BGR to RGB
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        cap.release()
         
-        # Compute random crop params on first frame (same crop for all frames)
-        if crop_params is None:
-            h, w = frame.shape[:2]
-            crop_params = get_random_crop_params(h, w, crop_size)
+        if len(frames) == 0:
+            raise ValueError(f"No frames loaded from video: {path}")
         
-        # Apply random crop (same position for all frames)
-        frame = apply_crop(frame, crop_size, crop_params)
+        # Stack frames: (T, H, W, C)
+        video = np.stack(frames, axis=0)
         
-        # Resize if specified
-        if resize is not None:
-            h, w = resize
-            frame = cv2.resize(frame, (w, h))
+        # Normalize to [0, 1]
+        video = video.astype(np.float32) / 255.0
         
-        frames.append(frame)
-        frame_count += 1
-    
-    cap.release()
-    
-    if len(frames) == 0:
-        raise ValueError(f"No frames loaded from video: {path}")
-    
-    # Stack frames: (T, H, W, C)
-    video = np.stack(frames, axis=0)
-    
-    # Normalize to [0, 1]
-    video = video.astype(np.float32) / 255.0
-    
-    num_real_frames = video.shape[0]
-    
-    # Pad to max_frames if video is shorter
-    if max_frames is not None and video.shape[0] < max_frames:
-        pad_size = max_frames - video.shape[0]
-        padding = np.zeros((pad_size, *video.shape[1:]), dtype=np.float32)
-        video = np.concatenate([video, padding], axis=0)
-    
-    # Create mask: 1 for real frames, 0 for padded
-    total_frames = video.shape[0]
-    mask = np.zeros(total_frames, dtype=np.float32)
-    mask[:num_real_frames] = 1.0
-    
+        num_real_frames = video.shape[0]
+        
+        # Pad to max_frames if video is shorter
+        if max_frames is not None and video.shape[0] < max_frames:
+            pad_size = max_frames - video.shape[0]
+            padding = np.zeros((pad_size, *video.shape[1:]), dtype=np.float32)
+            video = np.concatenate([video, padding], axis=0)
+        
+        # Create mask: 1 for real frames, 0 for padded
+        total_frames = video.shape[0]
+        mask = np.zeros(total_frames, dtype=np.float32)
+        mask[:num_real_frames] = 1.0
+    except Exception as e:
+        print(e, path) 
+        h, w = resize
+        video = np.zeros((max_frames, h, w, 3), dtype = np.float32)
+        mask = np.ones(max_frames, dtype = np.float32)
     return video, mask
 
 
@@ -387,6 +397,7 @@ def create_batched_dataloader(
         num_records=len(data_source),
         shuffle=shuffle,
         seed=seed,
+        num_epochs=1,
         shard_options=grain.NoSharding(),
     )
     
@@ -416,10 +427,10 @@ if __name__ == "__main__":
     # Example usage with Grain dataloader
     dataloader = create_dataloader(
         batch_size=1,
-        max_frames=32,
+        max_frames=1024,
         resize=(256, 256),
         shuffle=True,
-        num_workers=4,
+        num_workers=0,
         prefetch_size=2,
         seed=10
     )
@@ -428,6 +439,7 @@ if __name__ == "__main__":
     device = jax.devices()[0]
     
     for i, batch in enumerate(dataloader):
+
         # Transfer to GPU
         video = jax.device_put(batch["video"], device)
         mask = jax.device_put(batch["mask"], device)
@@ -440,13 +452,14 @@ if __name__ == "__main__":
         if i == 1:
             batch_to_video(batch, os.path.join(output_dir, "sample_unbatched.mp4"), fps=30.0)
         
-        if i >= 2:
+        if i >= 200:
             break
     
     print("\nTesting batched Grain dataloader...")
+    exit()
     batched_dataloader = create_batched_dataloader(
         batch_size=4,
-        max_frames=1024,
+        max_frames=128,
         resize=(256, 256),
         shuffle=True,
         num_workers=4,
@@ -458,6 +471,7 @@ if __name__ == "__main__":
         video = jax.device_put(batch["video"], device)
         mask = jax.device_put(batch["mask"], device)
         print(mask)
+        print(mask[0][0])
         # Sum real frames per video in batch
         real_frames_per_video = mask.sum(axis=1)
         print(f"Batch {i}: video shape={video.shape}, mask shape={mask.shape}, "
