@@ -12,7 +12,6 @@ import wandb
 import time
 from jaxtyping import jaxtyped, Float, Array
 from einops import rearrange, repeat, reduce
-from model_loader import load_checkpoint
 from classifier import Classifier
 
 

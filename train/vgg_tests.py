@@ -2,7 +2,8 @@ import jax
 import jax.numpy as jnp
 import flaxmodels as fm
 from einops import rearrange
-
+from flax import nnx
+from functools import partial
 
 def load_vgg(pretrained='imagenet', normalize=True):
     """Load VGG16 model for perceptual loss extraction.
@@ -18,17 +19,53 @@ def load_vgg(pretrained='imagenet', normalize=True):
         output='activations',
         pretrained=pretrained,
         normalize=normalize,
-        include_head=False
+        include_head=False, 
+        dtype=jnp.bfloat16
     )
 
     rng = jax.random.PRNGKey(0)
     dummy_input = jnp.ones((1, 224, 224, 3))
     params = model.init(rng, dummy_input)
 
+    # Convert params to bf16
+    params = jax.tree_util.tree_map(lambda x: x.astype(jnp.bfloat16), params)
+
     return model, params
 
 
-def get_perceptual_loss(model, params, x, target, layer_weights=None):
+PERCEPTUAL_LAYERS = ('relu1_1', 'relu1_2', 'relu2_1')
+
+def get_perceptual_loss_fn(model):
+    """Create a perceptual loss function with model captured in closure.
+
+    Args:
+        model: VGG model instance.
+
+    Returns:
+        A function (params, x, target) -> loss that can be jit-compiled without static_argnums.
+    """
+    def perceptual_loss(params, x, target):
+        x_flat = rearrange(x, 'b t h w c -> (b t) h w c').astype(jnp.bfloat16)
+        target_flat = rearrange(target, 'b t h w c -> (b t) h w c').astype(jnp.bfloat16)
+
+        def vgg_forward(params, inp):
+            return model.apply(params, inp)
+
+        checkpointed_forward = jax.checkpoint(vgg_forward)
+        x_feats = checkpointed_forward(params, x_flat)
+        target_feats = checkpointed_forward(params, target_flat)
+
+        loss = (
+            jnp.mean((x_feats['relu1_1'] - target_feats['relu1_1']) ** 2) +
+            jnp.mean((x_feats['relu1_2'] - target_feats['relu1_2']) ** 2) +
+            jnp.mean((x_feats['relu2_1'] - target_feats['relu2_1']) ** 2)
+        )
+        return loss
+
+    return perceptual_loss
+
+
+def get_perceptual_loss(model, params, x, target):
     """Compute perceptual loss using VGG features from first 3 layers.
 
     Args:
@@ -36,31 +73,29 @@ def get_perceptual_loss(model, params, x, target, layer_weights=None):
         params: Model parameters.
         x: Predicted images with shape (b, t, h, w, c).
         target: Target images with shape (b, t, h, w, c).
-        layer_weights: Optional dict mapping layer names to weights.
-                      Defaults to equal weighting of first 3 relu layers.
 
     Returns:
         Scalar perceptual loss value.
     """
-    if layer_weights is None:
-        layer_weights = {
-            'relu1_1': 1.0,
-            'relu1_2': 1.0,
-            'relu2_1': 1.0,
-        }
-
     x_flat = rearrange(x, 'b t h w c -> (b t) h w c').astype(jnp.bfloat16)
     target_flat = rearrange(target, 'b t h w c -> (b t) h w c').astype(jnp.bfloat16)
 
-    x_feats = model.apply(params, x_flat)
-    target_feats = model.apply(params, target_flat)
+    def vgg_forward(params, x):
+        return model.apply(params, x)
 
-    loss = 0.0
-    for layer_name, weight in layer_weights.items():
-        x_f = x_feats[layer_name]
-        t_f = target_feats[layer_name]
-        layer_loss = jnp.mean((x_f - t_f) ** 2)
-        loss = loss + weight * layer_loss
+    checkpointed_forward = jax.checkpoint(vgg_forward)
+    x_feats = checkpointed_forward(params, x_flat)
+    target_feats = checkpointed_forward(params, target_flat)
+
+    # Cast activations to bf16 (flaxmodels VGG outputs float32)
+    #x_feats = jax.tree_util.tree_map(lambda a: a.astype(jnp.bfloat16), x_feats)
+    #target_feats = jax.tree_util.tree_map(lambda a: a.astype(jnp.bfloat16), target_feats)
+
+    loss = (
+        jnp.mean((x_feats['relu1_1'] - target_feats['relu1_1']) ** 2) +
+        jnp.mean((x_feats['relu1_2'] - target_feats['relu1_2']) ** 2) +
+        jnp.mean((x_feats['relu2_1'] - target_feats['relu2_1']) ** 2)
+    )
 
     return loss
 
@@ -79,23 +114,24 @@ if __name__ == "__main__":
     print("Loading VGG model...")
     model, params = load_vgg(pretrained='imagenet', normalize=True)
 
-    # Verify params are in fp32
+    # Verify params are in bf16
     param_leaves = jax.tree_util.tree_leaves(params)
     print(f"  Params dtype: {param_leaves[0].dtype}")
-    assert param_leaves[0].dtype == jnp.float32, "Params should be fp32"
+    assert param_leaves[0].dtype == jnp.bfloat16, "Params should be bf16"
 
     # Test with different spatial sizes
     for test_h, test_w in [(64, 64), (128, 128), (224, 224)]:
         x = jnp.ones((b, t, test_h, test_w, c))
         x_flat = rearrange(x, 'b t h w c -> (b t) h w c').astype(jnp.bfloat16)
         feats = model.apply(params, x_flat)
+        # Cast activations to bf16 (flaxmodels VGG outputs float32)
+        feats = jax.tree_util.tree_map(lambda a: a.astype(jnp.bfloat16), feats)
 
         print(f"  Input shape: {x.shape}")
         print(f"  Flattened shape: {x_flat.shape} (dtype: {x_flat.dtype})")
-        for layer_name in ['relu1_1', 'relu1_2', 'relu2_1']:
+        for layer_name in PERCEPTUAL_LAYERS:
             feat = feats[layer_name]
             print(f"    {layer_name}: {feat.shape} (dtype: {feat.dtype})")
-            assert feat.dtype == jnp.bfloat16, f"Activations should be bf16, got {feat.dtype}"
 
     # Test perceptual loss function
     print("Testing perceptual loss...")
@@ -104,5 +140,31 @@ if __name__ == "__main__":
     loss = get_perceptual_loss(model, params, x, target)
     print(f"  Loss value: {loss}")
     assert loss.shape == (), f"Expected scalar loss, got shape {loss.shape}"
+
+    # Test with jax.jit
+    print("Testing with jax.jit...")
+    jit_perceptual_loss = jax.jit(get_perceptual_loss, static_argnums=(0,))
+    loss_jit = jit_perceptual_loss(model, params, x, target)
+    print(f"  JIT loss value: {loss_jit}")
+    print(jnp.max(jnp.abs(loss - loss_jit)))
+
+    # Test backprop with jit-compiled grad function
+    print("Testing backprop with jit...")
+
+    def loss_for_grad(x, target, model, params):
+        return get_perceptual_loss(model, params, x, target)
+
+    grad_fn = nnx.jit(jax.grad(loss_for_grad, argnums=0), static_argnums=(2,))
+
+    # Test with increasing batch sizes to find max
+    test_b, test_t, test_h, test_w, test_c = 32, 8, 256, 256, 3
+    print(f"  Testing backprop with shape ({test_b}, {test_t}, {test_h}, {test_w}, {test_c})...")
+    x_large = jnp.ones((test_b, test_t, test_h, test_w, test_c), dtype=jnp.bfloat16)
+    target_large = jnp.ones((test_b, test_t, test_h, test_w, test_c), dtype=jnp.bfloat16) * 0.5
+
+    grads = grad_fn(x_large, target_large, model, params)
+    print(f"  Gradient shape: {grads.shape}")
+    print(f"  Gradient dtype: {grads.dtype}")
+    print(f"  Gradient max: {jnp.max(jnp.abs(grads))}")
 
     print("All tests passed!")

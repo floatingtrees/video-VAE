@@ -74,8 +74,8 @@ def eval_step(model, video, mask, gamma1, gamma2, max_compression_rate, hw, rngs
 
 
 NUM_EPOCHS = 100
-BATCH_SIZE = 4
-MAX_FRAMES = 128
+BATCH_SIZE = 32
+MAX_FRAMES = 8
 RESIZE = (256, 256)
 SHUFFLE = True
 NUM_WORKERS = 4
