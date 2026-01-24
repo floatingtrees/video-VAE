@@ -9,7 +9,6 @@ from jaxtyping import jaxtyped, Float, Array
 from layers import PatchEmbedding, FactoredAttention, GumbelSigmoidSTE, PatchUnEmbedding
 from einops import rearrange
 from unet import UNet
-from classifier import Classifier
 
 
 class Encoder(nnx.Module):

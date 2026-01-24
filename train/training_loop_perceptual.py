@@ -13,7 +13,7 @@ import time
 from jaxtyping import jaxtyped, Float, Array
 from einops import rearrange, repeat, reduce
 from model_loader import load_checkpoint
-from vgg_tests import get_perceptual_loss, load_vgg
+from vgg_tests import get_perceptual_loss_fn, load_vgg
 
 
 import orbax.checkpoint as ocp
@@ -35,7 +35,7 @@ def reset_directory(path):
 
 NUM_EPOCHS = 100
 BATCH_SIZE = 32
-MAX_FRAMES = 8
+MAX_FRAMES = 4
 RESIZE = (256, 256)
 SHUFFLE = True
 NUM_WORKERS = 4
@@ -89,17 +89,12 @@ def print_max_grad(grads):
 
 def loss_fn(model: nnx.Module, video: Float[Array, "b time height width channels"],
     mask: Float[Array, "b 1 1 time"], original_mask: Float[Array, "b time"],
-    rngs: nnx.Rngs, hparams: dict, train: bool = True):
+    rngs: nnx.Rngs, hparams: dict, perceptual_loss_fn, vgg_params, train: bool = True):
     reconstruction, compressed_representation, selection, logvar, mean = model(video, mask, rngs, train=train)
     sequence_lengths = reduce(original_mask, "b time -> b 1", "sum")
     sequence_lengths = jnp.clip(sequence_lengths, 1.0, None)
 
-    video_shaped_mask = rearrange(original_mask, "b time -> b time 1 1 1")
-    masked_squared_error = jnp.square((video - reconstruction) * video_shaped_mask)
-    sequence_lengths_reshaped = rearrange(sequence_lengths, "b 1 -> b 1 1 1 1")
-
-    frame_reduced_error = reduce(masked_squared_error, "b time h w c -> b 1 h w c", "sum") / sequence_lengths_reshaped
-    MSE = jnp.mean(frame_reduced_error)
+    perceptual_loss = perceptual_loss_fn(vgg_params, reconstruction, video)
 
     kl_and_selection_mask = rearrange(original_mask, "b time -> b time 1 1")
 
@@ -119,30 +114,30 @@ def loss_fn(model: nnx.Module, video: Float[Array, "b time height width channels
     sequence_lengths_reshaped = rearrange(sequence_lengths, "b 1 -> b 1 1 1")
     kl_loss = 0.5 * (jnp.exp(logvar) - 1 - logvar + jnp.square(mean)) * kl_and_selection_mask / sequence_lengths_reshaped
     kl_loss = jnp.mean(kl_loss)
-    loss = MSE + hparams["gamma1"] * selection_loss + hparams["gamma2"] * kl_loss
+    loss = perceptual_loss + hparams["gamma1"] * selection_loss + hparams["gamma2"] * kl_loss
 
-    return loss, (MSE, selection_loss, kl_loss, reconstruction, kept_frame_density.mean())
+    return loss, (perceptual_loss, selection_loss, kl_loss, reconstruction, kept_frame_density.mean())
 
-def train_step(model, optimizer, video, mask, hparams: dict, hw: int, rngs: nnx.Rngs):
+def train_step(model, optimizer, video, mask, hparams: dict, hw: int, rngs: nnx.Rngs, perceptual_loss_fn, vgg_params):
     original_mask = mask.copy()
     mask = rearrange(mask, "b time -> b 1 1 time")
     mask = repeat(mask, "b 1 1 time -> b hw 1 1 time", hw=hw)
     mask = rearrange(mask, "b hw 1 1 time -> (b hw) 1 1 time")
     grad_fn = nnx.value_and_grad(loss_fn, has_aux=True)
-    (loss, (MSE, selection_loss, kl_loss, reconstruction, kept_frame_density)), grads = grad_fn(
-        model, video, mask, original_mask, rngs, hparams)
+    (loss, (perceptual_loss, selection_loss, kl_loss, reconstruction, kept_frame_density)), grads = grad_fn(
+        model, video, mask, original_mask, rngs, hparams, perceptual_loss_fn, vgg_params)
     optimizer.update(grads)
 
-    return loss, MSE, selection_loss, kl_loss, reconstruction, kept_frame_density
+    return loss, perceptual_loss, selection_loss, kl_loss, reconstruction, kept_frame_density
 
-def eval_step(model, video, mask, hparams: dict, hw: int, rngs: nnx.Rngs):
+def eval_step(model, video, mask, hparams: dict, hw: int, rngs: nnx.Rngs, perceptual_loss_fn, vgg_params):
     original_mask = mask.copy()
     mask = rearrange(mask, "b time -> b 1 1 time")
     mask = repeat(mask, "b 1 1 time -> b hw 1 1 time", hw=hw)
     mask = rearrange(mask, "b hw 1 1 time -> (b hw) 1 1 time")
-    loss, (MSE, selection_loss, kl_loss, reconstruction, kept_frame_density) = loss_fn(
-        model, video, mask, original_mask, rngs, hparams, train=False)
-    return loss, MSE, selection_loss, kl_loss, reconstruction, kept_frame_density
+    loss, (perceptual_loss, selection_loss, kl_loss, reconstruction, kept_frame_density) = loss_fn(
+        model, video, mask, original_mask, rngs, hparams, perceptual_loss_fn, vgg_params, train=False)
+    return loss, perceptual_loss, selection_loss, kl_loss, reconstruction, kept_frame_density
 
 
 
@@ -200,8 +195,13 @@ if __name__ == "__main__":
         SEED = 42
 
     rngs = nnx.Rngs(3)
-    jit_train_step = nnx.jit(train_step, static_argnames=("hw",))
-    jit_eval_step = nnx.jit(eval_step, static_argnames=("hw",))
+
+    # Load VGG for perceptual loss
+    vgg_model, vgg_params = load_vgg()
+    perceptual_loss_fn = get_perceptual_loss_fn(vgg_model)
+
+    jit_train_step = nnx.jit(train_step, static_argnames=("hw", "perceptual_loss_fn"))
+    jit_eval_step = nnx.jit(eval_step, static_argnames=("hw", "perceptual_loss_fn"))
     device = jax.devices()[0]
     start = time.perf_counter()
     os.makedirs(os.path.join(VIDEO_SAVE_DIR, f"train"), exist_ok=True)
@@ -252,8 +252,8 @@ if __name__ == "__main__":
             mask = mask.astype(jnp.bool)
             video = video.astype(jnp.bfloat16)
 
-            loss, MSE, selection_loss, kl_loss, reconstruction, kept_frame_density = jit_train_step(
-                model, optimizer, video, mask, hparams, hw, rngs)                                  
+            loss, perceptual_loss, selection_loss, kl_loss, reconstruction, kept_frame_density = jit_train_step(
+                model, optimizer, video, mask, hparams, hw, rngs, perceptual_loss_fn, vgg_params)                                  
             if i % 1000 == 999:
                 recon_batch = {
                     "video": reconstruction,
@@ -264,7 +264,7 @@ if __name__ == "__main__":
             if TRAINING_RUN:
                 wandb.log({
                     "train_loss": loss,
-                    "train_MSE": MSE,
+                    "train_perceptual_loss": perceptual_loss,
                     "train_Selection Loss": selection_loss,
                     "train_KL Loss": kl_loss,
                     "train_time": time.perf_counter() - start,
@@ -273,15 +273,15 @@ if __name__ == "__main__":
                     "effective_max_frames": effective_max_frames,
                 })
             else:
-                print(f"Epoch {epoch}, Step {i}: Loss = {float(loss):.4f}, MSE = {float(MSE):.4f}, Selection Loss = {float(selection_loss):.4f}, KL Loss = {float(kl_loss):.4f}, time = {time.perf_counter() - start:.4f}, kept_frame_density = {float(kept_frame_density):.4f}, effective_batch_size = {effective_batch_size}, effective_max_frames = {effective_max_frames}")
+                print(f"Epoch {epoch}, Step {i}: Loss = {float(loss):.4f}, Perceptual Loss = {float(perceptual_loss):.4f}, Selection Loss = {float(selection_loss):.4f}, KL Loss = {float(kl_loss):.4f}, time = {time.perf_counter() - start:.4f}, kept_frame_density = {float(kept_frame_density):.4f}, effective_batch_size = {effective_batch_size}, effective_max_frames = {effective_max_frames}")
         save_checkpoint(model, optimizer, f"{model_save_path}/checkpoint_{epoch}")
         
         for i, batch in enumerate(test_dataloader):
             video = jax.device_put(batch["video"], device)
             mask = jax.device_put(batch["mask"], device)
             mask = mask.astype(jnp.bool)
-            loss, MSE, selection_loss, kl_loss, reconstruction, kept_frame_density = jit_eval_step(
-                model, video, mask, hparams, hw, rngs)
+            loss, perceptual_loss, selection_loss, kl_loss, reconstruction, kept_frame_density = jit_eval_step(
+                model, video, mask, hparams, hw, rngs, perceptual_loss_fn, vgg_params)
             if i % 100 == 0:
                 recon_batch = {
                     "video": reconstruction,
@@ -292,14 +292,14 @@ if __name__ == "__main__":
             if TRAINING_RUN:
                 wandb.log({
                     "eval_loss": loss,
-                    "eval_MSE": MSE,
+                    "eval_perceptual_loss": perceptual_loss,
                     "eval_Selection Loss": selection_loss,
                     "eval_KL Loss": kl_loss,
                     "eval_time": time.perf_counter() - start,
-                    "kept_frame_density": kept_frame_density, 
+                    "kept_frame_density": kept_frame_density,
                     "effective_batch_size": effective_batch_size,
                     "effective_max_frames": effective_max_frames
                 })
             else:
-                print(f"VALIDATION Epoch {epoch}, Step {i}: Loss = {float(loss):.4f}, MSE = {float(MSE):.4f}, Selection Loss = {float(selection_loss):.4f}, KL Loss = {float(kl_loss):.4f}, effective_batch_size = {effective_batch_size}, effective_max_frames = {effective_max_frames}")
+                print(f"VALIDATION Epoch {epoch}, Step {i}: Loss = {float(loss):.4f}, Perceptual Loss = {float(perceptual_loss):.4f}, Selection Loss = {float(selection_loss):.4f}, KL Loss = {float(kl_loss):.4f}, effective_batch_size = {effective_batch_size}, effective_max_frames = {effective_max_frames}")
 
