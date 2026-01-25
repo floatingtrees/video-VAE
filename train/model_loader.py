@@ -37,7 +37,7 @@ def load_checkpoint(model, optimizer, path):
           "model": jax.tree.map(ocp.utils.to_shape_dtype_struct, nnx.state(model)),                                  
           "optimizer": jax.tree.map(ocp.utils.to_shape_dtype_struct, nnx.state(optimizer))                           
       }                                                                                                              
-      restored = ocp.StandardCheckpointer().restore(path, abstract_state, partial_restore=True)                                            
+      restored = ocp.StandardCheckpointer().restore(path, abstract_state)                                            
       nnx.update(model, restored["model"])                                                                           
       nnx.update(optimizer, restored["optimizer"])   
 
