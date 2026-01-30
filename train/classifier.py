@@ -35,11 +35,13 @@ class Classifier(nnx.Module):
                 dtype=dtype,
                 param_dtype=param_dtype
             ))
+        self.norm = nnx.LayerNorm(self.last_dim, dtype=dtype, param_dtype=param_dtype, rngs=rngs)
 
     def __call__(self, x: Float[Array, "b time height width channels"], mask: Float[Array, "b 1 1 time"], train: bool = True):
         x = self.patch_embedding(x)
         for layer in self.layers:
             x = layer(x, mask)
+        x = self.norm(x)
         return self.classifier(x)[:, 0, 0]
 
 if __name__ == "__main__":
