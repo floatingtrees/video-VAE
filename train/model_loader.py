@@ -41,6 +41,19 @@ def load_checkpoint(model, optimizer, path):
       nnx.update(model, restored["model"])                                                                           
       nnx.update(optimizer, restored["optimizer"])   
 
+def load_checkpoint_adversarial(model, optimizer, discriminator, discriminator_optimizer, path):                                                                       
+      abstract_state = {                                                                                             
+          "model": jax.tree.map(ocp.utils.to_shape_dtype_struct, nnx.state(model)),                                  
+          "optimizer": jax.tree.map(ocp.utils.to_shape_dtype_struct, nnx.state(optimizer)),                           
+          "discriminator": jax.tree.map(ocp.utils.to_shape_dtype_struct, nnx.state(discriminator)),
+          "discriminator_optimizer": jax.tree.map(ocp.utils.to_shape_dtype_struct, nnx.state(discriminator_optimizer))
+      }                                                                                                              
+      restored = ocp.StandardCheckpointer().restore(path, abstract_state)                                            
+      nnx.update(model, restored["model"])                                                                           
+      nnx.update(optimizer, restored["optimizer"])   
+      nnx.update(discriminator, restored["discriminator"])
+      nnx.update(discriminator_optimizer, restored["discriminator_optimizer"])
+
 if __name__ == "__main__":
     schedule_fn= optax.warmup_cosine_decay_schedule(
         init_value=0.0,

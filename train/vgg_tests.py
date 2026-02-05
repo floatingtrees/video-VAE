@@ -35,6 +35,38 @@ def load_vgg(pretrained='imagenet', normalize=True):
 
 PERCEPTUAL_LAYERS = ('relu1_1', 'relu1_2', 'relu2_1')
 
+def get_adversarial_perceptual_loss_fn(model):
+    """Create a perceptual loss function with model captured in closure.
+
+    Args:
+        model: VGG model instance.
+
+    Returns:
+        A function (params, x, target) -> loss that can be jit-compiled without static_argnums.
+    """
+    def perceptual_loss(params, x, target):
+        b, t, h, w, c = x.shape
+        x_flat = rearrange(x, 'b t h w c -> (b t) h w c').astype(jnp.bfloat16)
+        target_flat = rearrange(target, 'b t h w c -> (b t) h w c').astype(jnp.bfloat16)
+
+        def vgg_forward(params, inp):
+            return model.apply(params, inp)
+
+        checkpointed_forward = jax.checkpoint(vgg_forward)
+        x_feats = checkpointed_forward(params, x_flat)
+        target_feats = checkpointed_forward(params, target_flat)
+
+        loss_weird = (
+            jnp.mean((x_feats['relu1_1'] - target_feats['relu1_1']) ** 2, axis=tuple(range(1, x_feats['relu1_1'].ndim))) +
+            jnp.mean((x_feats['relu1_2'] - target_feats['relu1_2']) ** 2, axis=tuple(range(1, x_feats['relu1_2'].ndim))) +
+            jnp.mean((x_feats['relu2_1'] - target_feats['relu2_1']) ** 2, axis=tuple(range(1, x_feats['relu2_1'].ndim)))
+        )
+        loss_unflattened = rearrange(loss_weird, "(b t) -> b t", b=b, t=t)
+        loss = jnp.mean(loss_unflattened, axis = -1)
+        return loss
+
+    return perceptual_loss
+
 def get_perceptual_loss_fn(model):
     """Create a perceptual loss function with model captured in closure.
 
