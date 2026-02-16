@@ -4,7 +4,6 @@ os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".99"
 
 from dataloader import create_batched_dataloader, batch_to_video
 from rl_model import VideoVAE
-from classifier import Classifier
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -35,7 +34,7 @@ def reset_directory(path):
 
 
 NUM_EPOCHS = 100
-BATCH_SIZE = 2
+BATCH_SIZE = 4
 MAX_FRAMES = 32
 RESIZE = (256, 256)
 SHUFFLE = True
@@ -48,8 +47,7 @@ DECAY_STEPS = 1_000_000
 GAMMA1 = 0.2 # If too low, the encoder used to drop all frames, but STE gating function should prevent that now
 GAMMA2 = 0.001 # VAE regularization weight
 GAMMA3 = 0.1 # Perceptual loss weight
-GAMMA4 = 0.001  # Adversarial loss weight
-ADVERSARIAL_START_STEPS = 0
+GAMMA4 = 0.05 # MAE loss weight
 LEARNING_RATE = 2e-5
 WARMUP_STEPS = 20000 // math.sqrt(BATCH_SIZE)
 VIDEO_SAVE_DIR = "outputs"
@@ -61,21 +59,11 @@ max_compression_rate = 2
 def per_sample_mean(x: Float[Array, "b ..."]):
     return jnp.mean(x, axis=tuple(range(1, x.ndim)))
 
-def save_checkpoint(model, optimizer, path):     
-    raise NotImplementedError("Use save_checkpoint_adversarial instead")        
-    state = {                                                                                                      
-        "model": nnx.state(model),                                                                                 
-        "optimizer": nnx.state(optimizer),     
-    }                                                                                                              
-    ocp.StandardCheckpointer().save(path, state)                                                        
-
-def save_checkpoint_adversarial(model, optimizer, discriminator, discriminator_optimizer, path):
-    state = {                                                                                                      
-        "model": nnx.state(model),                                                                                 
-        "optimizer": nnx.state(optimizer),     
-        "discriminator": nnx.state(discriminator),                                                                                 
-        "discriminator_optimizer": nnx.state(discriminator_optimizer),     
-    }                                                                                                              
+def save_checkpoint(model, optimizer, path):
+    state = {
+        "model": nnx.state(model),
+        "optimizer": nnx.state(optimizer),
+    }
     ocp.StandardCheckpointer().save(path, state)                                                        
 
 def magnify_negatives(x, magnification_rate: float):
@@ -111,8 +99,7 @@ def binary_crossentropy(probs, labels, epsilon=1e-7):
 
 def loss_fn(model: nnx.Module, video: Float[Array, "b time height width channels"],
     mask: Float[Array, "b 1 1 time"], original_mask: Float[Array, "b time"],
-    rngs: nnx.Rngs, hparams: dict, perceptual_loss_fn, vgg_params,
-    discriminator: nnx.Module = None, use_adversarial: bool = False, train: bool = True):
+    rngs: nnx.Rngs, hparams: dict, perceptual_loss_fn, vgg_params, train: bool = True):
     reconstruction, compressed_representation, selection, selection_mask, logvar, mean = model(video, mask, rngs, train=train)
     output_mask = repeat(original_mask, "b time-> (b 2) time")
     sequence_lengths = reduce(output_mask, "b time -> b 1", "sum")
@@ -121,10 +108,19 @@ def loss_fn(model: nnx.Module, video: Float[Array, "b time height width channels
 
     video_shaped_mask = rearrange(output_mask, "b time -> b time 1 1 1")
     video = repeat(video, "b ... -> (b 2) ...")
-    masked_squared_error = jnp.square((video - reconstruction) * video_shaped_mask)
+    
     sequence_lengths_reshaped = rearrange(sequence_lengths, "b 1 -> b 1 1 1 1")
+
+    masked_abs_error = jnp.square((video - reconstruction) * video_shaped_mask)
+    sequence_lengths_reshaped = rearrange(sequence_lengths, "b 1 -> b 1 1 1 1")
+    frame_reduced_MAE = reduce(masked_abs_error, "b time h w c -> b 1 h w c", "sum") / sequence_lengths_reshaped
+    per_sample_MAE = per_sample_mean(frame_reduced_MAE)
+
+    masked_squared_error = jnp.square((video - reconstruction) * video_shaped_mask)
     frame_reduced_error = reduce(masked_squared_error, "b time h w c -> b 1 h w c", "sum") / sequence_lengths_reshaped
     per_sample_error = per_sample_mean(frame_reduced_error)
+
+    
 
     perceptual_loss: Float[Array, "b"] = perceptual_loss_fn(vgg_params, reconstruction, video)
 
@@ -150,16 +146,7 @@ def loss_fn(model: nnx.Module, video: Float[Array, "b time height width channels
     kl_loss = 0.5 * (jnp.exp(logvar) - 1 - logvar + jnp.square(mean)) * kl_and_selection_mask / sequence_lengths_reshaped_kl
     kl_loss = per_sample_mean(kl_loss)
 
-    # Adversarial loss (generator wants discriminator to output high values for reconstructions)
-    if use_adversarial and discriminator is not None:
-        # mask is already expanded to (b*hw, 1, 1, time) by train_step
-        fake_logits = discriminator(reconstruction, mask, train=False)
-        # Non-saturating GAN loss: -log(sigmoid(D(fake))) = softplus(-D(fake))
-        adversarial_loss = per_sample_mean(jax.nn.softplus(-fake_logits))
-    else:
-        adversarial_loss = 0.0
-
-    per_sample_loss = per_sample_error + hparams["gamma3"] * perceptual_loss + hparams["gamma1"] * selection_loss + hparams["gamma2"] * kl_loss + hparams["gamma4"] * adversarial_loss
+    per_sample_loss = per_sample_error + hparams["gamma3"] * perceptual_loss + hparams["gamma1"] * selection_loss + hparams["gamma2"] * kl_loss + hparams["gamma4"] * per_sample_MAE
     pairs = rearrange(per_sample_loss, "(b p) -> b p", p = 2)
     means = rearrange(per_sample_mean(pairs), "b -> b 1")
     stds = rearrange(jnp.std(pairs, axis=1) + 1e-6, "b -> b 1")
@@ -191,64 +178,33 @@ def loss_fn(model: nnx.Module, video: Float[Array, "b time height width channels
         "perceptual_loss": jnp.mean(perceptual_loss),
         "selection_loss": jnp.mean(selection_loss),
         "kl_loss": jnp.mean(kl_loss),
-        "adversarial_loss": jnp.mean(adversarial_loss),
         "reconstruction": reconstruction,
         "kept_frame_density": kept_frame_density.mean(),
         "mean_trajectory_prob": jnp.mean(raw_trajectory_probs),
         "rl_loss": jnp.mean(rl_loss),
+        "per_sample_MAE": jnp.mean(per_sample_MAE),
     }
 
-def discriminator_loss_fn(discriminator: nnx.Module, real_video: Float[Array, "b time height width channels"],
-    fake_video: Float[Array, "b time height width channels"], mask: Float[Array, "b 1 1 time"], train: bool = True):
-    # Standard GAN discriminator loss
-    real_logits = discriminator(real_video, mask, train=train)
-    fake_logits = discriminator(fake_video, mask, train=train)
-    # D wants real -> 1, fake -> 0
-    # Loss: -log(sigmoid(D(real))) - log(1 - sigmoid(D(fake))) = softplus(-D(real)) + softplus(D(fake))
-    real_loss = per_sample_mean(jax.nn.softplus(-real_logits))
-    fake_loss = per_sample_mean(jax.nn.softplus(fake_logits))
-    # Accuracy: real should have positive logits, fake should have negative logits
-    real_accuracy = jnp.mean(real_logits > 0)
-    fake_accuracy = jnp.mean(fake_logits < 0)
-    accuracy = (real_accuracy + fake_accuracy) / 2
-    return real_loss + fake_loss, (real_loss, fake_loss, accuracy)
-
-def discriminator_loss_fn_wrapper(discriminator: nnx.Module, real_video: Float[Array, "b time height width channels"],
-    fake_video: Float[Array, "b time height width channels"], mask: Float[Array, "b 1 1 time"], train: bool = True):
-    loss, aux = discriminator_loss_fn(discriminator, real_video, fake_video, mask, train)
-    return jnp.mean(loss), aux
-
-def discriminator_train_step(discriminator, disc_optimizer, real_video, fake_video, mask, hw: int):
-    disc_mask = rearrange(mask, "b time -> b 1 1 time")
-    disc_mask = repeat(disc_mask, "b 1 1 time -> b hw 1 1 time", hw=hw)
-    disc_mask = rearrange(disc_mask, "b hw 1 1 time -> (b hw) 1 1 time")
-    grad_fn = nnx.value_and_grad(discriminator_loss_fn_wrapper, has_aux=True)
-    (disc_loss, (real_loss, fake_loss, accuracy)), grads = grad_fn(discriminator, real_video, fake_video, disc_mask)
-    disc_optimizer.update(grads)
-    return disc_loss, real_loss, fake_loss, accuracy
-
-def train_step(model, optimizer, video, mask, hparams: dict, hw: int, rngs: nnx.Rngs, perceptual_loss_fn, vgg_params,
-    discriminator: nnx.Module = None, use_adversarial: bool = False):
+def train_step(model, optimizer, video, mask, hparams: dict, hw: int, rngs: nnx.Rngs, perceptual_loss_fn, vgg_params):
     original_mask = mask.copy()
     mask = rearrange(mask, "b time -> b 1 1 time")
     mask = repeat(mask, "b 1 1 time -> b hw 1 1 time", hw=hw)
     mask = rearrange(mask, "b hw 1 1 time -> (b hw) 1 1 time")
     grad_fn = nnx.value_and_grad(loss_fn, has_aux=True)
     (loss, aux), grads = grad_fn(
-        model, video, mask, original_mask, rngs, hparams, perceptual_loss_fn, vgg_params, discriminator, use_adversarial)
+        model, video, mask, original_mask, rngs, hparams, perceptual_loss_fn, vgg_params)
     optimizer.update(grads)
 
     return loss, aux
 
-def eval_step(model, video, mask, hparams: dict, hw: int, rngs: nnx.Rngs, perceptual_loss_fn, vgg_params,
-    discriminator: nnx.Module = None, use_adversarial: bool = False):
+def eval_step(model, video, mask, hparams: dict, hw: int, rngs: nnx.Rngs, perceptual_loss_fn, vgg_params):
     original_mask = mask.copy()
     mask = rearrange(mask, "b time -> b 1 1 time")
     mask = repeat(mask, "b 1 1 time -> b hw 1 1 time", hw=hw)
     mask = rearrange(mask, "b hw 1 1 time -> (b hw) 1 1 time")
     # Train=False samples from the modal distribution, which is not ideal
     loss, aux = loss_fn(
-        model, video, mask, original_mask, rngs, hparams, perceptual_loss_fn, vgg_params, discriminator, use_adversarial, train=True)
+        model, video, mask, original_mask, rngs, hparams, perceptual_loss_fn, vgg_params, train=True)
     return loss, aux
 
 
@@ -317,18 +273,8 @@ if __name__ == "__main__":
     vgg_model, vgg_params = load_vgg()
     perceptual_loss_fn = get_adversarial_perceptual_loss_fn(vgg_model)
 
-    # Create discriminator for adversarial loss
-    discriminator = Classifier(channels=3, base_features=32, num_levels=4, rngs=nnx.Rngs(4),
-        temporal_kernel=7, dtype=jnp.bfloat16, param_dtype=jnp.float32)
-    disc_optimizer_def = optax.chain(
-        optax.clip_by_global_norm(1.0),
-        optax.adam(learning_rate=schedule_fn)
-    )
-    disc_optimizer = nnx.Optimizer(discriminator, disc_optimizer_def)
-
-    jit_train_step = nnx.jit(train_step, static_argnames=("hw", "perceptual_loss_fn", "use_adversarial"))
-    jit_eval_step = nnx.jit(eval_step, static_argnames=("hw", "perceptual_loss_fn", "use_adversarial"))
-    jit_disc_train_step = nnx.jit(discriminator_train_step, static_argnames=("hw",))
+    jit_train_step = nnx.jit(train_step, static_argnames=("hw", "perceptual_loss_fn"))
+    jit_eval_step = nnx.jit(eval_step, static_argnames=("hw", "perceptual_loss_fn"))
     global_step = 0
     device = jax.devices()[0]
     start = time.perf_counter()
@@ -383,15 +329,8 @@ if __name__ == "__main__":
             mask = mask.astype(jnp.bool)
             video = video.astype(jnp.bfloat16)
 
-            use_adversarial = global_step >= ADVERSARIAL_START_STEPS
-
             loss, aux = jit_train_step(
-                model, optimizer, video, mask, hparams, hw, rngs, perceptual_loss_fn, vgg_params, discriminator, use_adversarial)
-
-            # Always train discriminator (but only add to generator loss when use_adversarial)
-            discriminator_reconstruction_batch = rearrange(aux["reconstruction"], "(b p) ... -> b p ...", p = 2)
-            disc_loss, real_loss, fake_loss, disc_accuracy = jit_disc_train_step(
-                discriminator, disc_optimizer, video, discriminator_reconstruction_batch[:, 0, ...], mask, hw)
+                model, optimizer, video, mask, hparams, hw, rngs, perceptual_loss_fn, vgg_params)
 
             global_step += 1
 
@@ -409,27 +348,24 @@ if __name__ == "__main__":
                     "train_perceptual_loss": aux["perceptual_loss"],
                     "train_Selection Loss": aux["selection_loss"],
                     "train_KL Loss": aux["kl_loss"],
-                    "train_adversarial_loss": aux["adversarial_loss"],
-                    "train_disc_loss": disc_loss,
-                    "train_disc_accuracy": disc_accuracy,
                     "train_time": time.perf_counter() - start,
                     "kept_frame_density": aux["kept_frame_density"],
                     "mean_trajectory_prob": aux["mean_trajectory_prob"],
                     "train_rl_loss": aux["rl_loss"],
+                    "train_per_sample_MAE": aux["per_sample_MAE"],
                     "effective_batch_size": effective_batch_size,
                     "effective_max_frames": effective_max_frames,
                     "global_step": global_step,
                 })
             else:
-                print(f"Epoch {epoch}, Step {i}: Loss = {float(loss):.4f}, MSE = {float(aux['MSE']):.4f}, Perceptual Loss = {float(aux['perceptual_loss']):.4f}, Selection Loss = {float(aux['selection_loss']):.4f}, KL Loss = {float(aux['kl_loss']):.4f}, Adv Loss = {float(aux['adversarial_loss']):.4f}, Disc Loss = {float(disc_loss):.4f}, Disc Acc = {float(disc_accuracy):.4f}, time = {time.perf_counter() - start:.4f}, kept_frame_density = {float(aux['kept_frame_density']):.4f}, mean_traj_prob = {float(aux['mean_trajectory_prob']):.6f}, rl_loss = {float(aux['rl_loss']):.4f}")
-        save_checkpoint_adversarial(model, optimizer, discriminator, disc_optimizer, f"{model_save_path}/checkpoint_{epoch}")
+                print(f"Epoch {epoch}, Step {i}: Loss = {float(loss):.4f}, MSE = {float(aux['MSE']):.4f}, Perceptual Loss = {float(aux['perceptual_loss']):.4f}, Selection Loss = {float(aux['selection_loss']):.4f}, KL Loss = {float(aux['kl_loss']):.4f}, time = {time.perf_counter() - start:.4f}, kept_frame_density = {float(aux['kept_frame_density']):.4f}, mean_traj_prob = {float(aux['mean_trajectory_prob']):.6f}, rl_loss = {float(aux['rl_loss']):.4f}, per_sample_MAE = {float(aux['per_sample_MAE']):.4f}")
+        save_checkpoint(model, optimizer, f"{model_save_path}/checkpoint_{epoch}")
         for i, batch in enumerate(test_dataloader):
             video = jax.device_put(batch["video"], device)
             mask = jax.device_put(batch["mask"], device)
             mask = mask.astype(jnp.bool)
-            use_adversarial = global_step >= ADVERSARIAL_START_STEPS
             loss, aux = jit_eval_step(
-                model, video, mask, hparams, hw, rngs, perceptual_loss_fn, vgg_params, discriminator, use_adversarial)
+                model, video, mask, hparams, hw, rngs, perceptual_loss_fn, vgg_params)
             if i % 100 == 0:
                 recon_batch = {
                     "video": aux["reconstruction"][:effective_batch_size],
@@ -444,12 +380,12 @@ if __name__ == "__main__":
                     "eval_perceptual_loss": aux["perceptual_loss"],
                     "eval_Selection Loss": aux["selection_loss"],
                     "eval_KL Loss": aux["kl_loss"],
-                    "eval_adversarial_loss": aux["adversarial_loss"],
                     "eval_time": time.perf_counter() - start,
+                    "eval_per_sample_MAE": aux["per_sample_MAE"],
                     "kept_frame_density": aux["kept_frame_density"],
                     "effective_batch_size": effective_batch_size,
                     "effective_max_frames": effective_max_frames
                 })
             else:
-                print(f"VALIDATION Epoch {epoch}, Step {i}: Loss = {float(loss):.4f}, MSE = {float(aux['MSE']):.4f}, Perceptual Loss = {float(aux['perceptual_loss']):.4f}, Selection Loss = {float(aux['selection_loss']):.4f}, KL Loss = {float(aux['kl_loss']):.4f}, Adv Loss = {float(aux['adversarial_loss']):.4f}, effective_batch_size = {effective_batch_size}, effective_max_frames = {effective_max_frames}")
+                print(f"VALIDATION Epoch {epoch}, Step {i}: Loss = {float(loss):.4f}, MSE = {float(aux['MSE']):.4f}, Perceptual Loss = {float(aux['perceptual_loss']):.4f}, Selection Loss = {float(aux['selection_loss']):.4f}, KL Loss = {float(aux['kl_loss']):.4f}, per_sample_MAE = {float(aux['per_sample_MAE']):.4f}, effective_batch_size = {effective_batch_size}, effective_max_frames = {effective_max_frames}")
 
