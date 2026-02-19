@@ -34,7 +34,7 @@ def reset_directory(path):
 
 
 NUM_EPOCHS = 100
-BATCH_SIZE = 4
+BATCH_SIZE = 2
 MAX_FRAMES = 32
 RESIZE = (256, 256)
 SHUFFLE = True
@@ -111,7 +111,7 @@ def loss_fn(model: nnx.Module, video: Float[Array, "b time height width channels
     
     sequence_lengths_reshaped = rearrange(sequence_lengths, "b 1 -> b 1 1 1 1")
 
-    masked_abs_error = jnp.square((video - reconstruction) * video_shaped_mask)
+    masked_abs_error = jnp.abs((video - reconstruction) * video_shaped_mask)
     sequence_lengths_reshaped = rearrange(sequence_lengths, "b 1 -> b 1 1 1 1")
     frame_reduced_MAE = reduce(masked_abs_error, "b time h w c -> b 1 h w c", "sum") / sequence_lengths_reshaped
     per_sample_MAE = per_sample_mean(frame_reduced_MAE)
@@ -334,7 +334,7 @@ if __name__ == "__main__":
 
             global_step += 1
 
-            if i % 1000 == 999:
+            if i % 500 == 499:
                 recon_batch = {
                     "video": aux["reconstruction"][:effective_batch_size],
                     "mask": mask  # or mask.squeeze(), depending on shape
