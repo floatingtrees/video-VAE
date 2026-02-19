@@ -18,7 +18,7 @@ num_devices = jax.device_count()
 print(f"Process {proc_id}: {jax.local_device_count()} local devices, {num_devices} total devices")
 
 # Create a mesh for data parallelism across all devices
-mesh = jax.make_mesh((num_devices,), ('data',))
+mesh = jax.make_mesh((num_devices,), ('data',)) 
 
 # Tiny model dimensions for testing
 HEIGHT = 32
