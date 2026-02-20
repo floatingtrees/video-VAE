@@ -129,8 +129,6 @@ if __name__ == "__main__":
 
     if process_index == 0:
         print(f"Checkpoint save path: {model_save_path}")
-    jax.experimental.multihost_utils.sync_global_devices("init_done")
-
     if process_index == 0:
         print(f"Per-device batch: {PER_DEVICE_BATCH_SIZE}, "
               f"Local batch: {LOCAL_BATCH_SIZE}, "
@@ -167,6 +165,16 @@ if __name__ == "__main__":
                 "seed": SEED,
             },
         )
+
+    # Don't use sync_global_devices here — wandb.init() can trigger internal
+    # JAX collectives on process 0 that cross with the barrier on other workers.
+    # A simple sleep lets wandb finish; workers hard-sync at the first real
+    # JAX collective in training anyway.
+    if process_index != 0:
+        import time
+        time.sleep(10)
+    if process_index == 0:
+        print("Wandb init complete, proceeding.")
 
     # -------------------------------------------------------------------
     # Helpers
