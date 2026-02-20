@@ -42,7 +42,7 @@ RLLossWeight = 0.01
 max_compression_rate = 2
 DATA_DIR = os.path.expanduser("~/data/videos")
 VIDEO_SAVE_DIR = "outputs"
-model_save_path = os.path.expanduser("~/video_vae_distributed_saves/")
+model_save_path = f"gs://tpus-487818-checkpoints/run{int(time.time())}/perceptual_loss_model"
 SHUFFLE = True
 NUM_WORKERS = 4
 PREFETCH_SIZE = 16
@@ -125,12 +125,9 @@ if __name__ == "__main__":
 
     IS_TEST = args.test
 
-    # Reset checkpoint directory (process 0 only)
     if process_index == 0:
-        if os.path.exists(model_save_path):
-            shutil.rmtree(model_save_path)
-        os.makedirs(model_save_path, exist_ok=True)
-    jax.experimental.multihost_utils.sync_global_devices("reset_dir")
+        print(f"Checkpoint save path: {model_save_path}")
+    jax.experimental.multihost_utils.sync_global_devices("init_done")
 
     if process_index == 0:
         print(f"Per-device batch: {PER_DEVICE_BATCH_SIZE}, "
