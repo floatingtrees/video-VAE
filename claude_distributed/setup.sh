@@ -36,40 +36,51 @@ gcloud compute tpus tpu-vm ssh ${TPU_NAME} --zone=${ZONE} --worker=all \
   " --internal-ip
 
 # Step 3: Create dummy video data on workers that don't have real data
-# The dataloader needs video files to exist, even if they're tiny dummy files.
-# Each worker gets its own unique shard via grain's ShardOptions, so the
-# dataloader just needs files to exist at the expected paths.
+# Uses OpenCV (installed via opencv-python-headless) since ffmpeg may not be available.
 echo "--- Creating dummy video data on workers without real data ---"
 gcloud compute tpus tpu-vm ssh ${TPU_NAME} --zone=${ZONE} --worker=all \
-  --command='
-    if [ ! -d ~/data/videos/videos0 ]; then
-      echo "No real data found, creating dummy videos..."
-      mkdir -p ~/data/videos/videos0/videos0
-      mkdir -p ~/data/videos/videos1/videos1
-      # Create dummy mp4 files using ffmpeg (tiny 8-frame 64x64 videos)
-      for i in $(seq 1 200); do
-        ffmpeg -y -f lavfi -i "color=c=blue:s=64x64:d=0.27:r=30" \
-          -c:v libx264 -pix_fmt yuv420p -loglevel quiet \
-          ~/data/videos/videos0/videos0/dummy_${i}.mp4 2>/dev/null
-      done
-      for i in $(seq 1 200); do
-        ffmpeg -y -f lavfi -i "color=c=red:s=64x64:d=0.27:r=30" \
-          -c:v libx264 -pix_fmt yuv420p -loglevel quiet \
-          ~/data/videos/videos1/videos1/dummy_${i}.mp4 2>/dev/null
-      done
-      echo "Created 400 dummy videos"
-    else
-      echo "Real data already exists, skipping dummy creation."
-    fi
-  ' --internal-ip
+  --command='python3 -c "
+import os, numpy as np, cv2
+
+vdir = os.path.expanduser(\"~/data/videos/videos0/videos0\")
+if os.path.isdir(vdir):
+    count = len([f for f in os.listdir(vdir) if f.endswith(\".mp4\") and not f.startswith(\"dummy\")])
+    if count > 50:
+        print(f\"Real data exists ({count} videos), skipping.\")
+        exit(0)
+
+print(\"Creating dummy videos with OpenCV...\")
+for shard in [0, 1]:
+    d = os.path.expanduser(f\"~/data/videos/videos{shard}/videos{shard}\")
+    os.makedirs(d, exist_ok=True)
+    for i in range(200):
+        path = os.path.join(d, f\"dummy_{i}.mp4\")
+        if os.path.exists(path) and os.path.getsize(path) > 100:
+            continue
+        fourcc = cv2.VideoWriter_fourcc(*\"mp4v\")
+        writer = cv2.VideoWriter(path, fourcc, 30.0, (64, 64))
+        for _ in range(8):
+            frame = np.random.randint(0, 255, (64, 64, 3), dtype=np.uint8)
+            writer.write(frame)
+        writer.release()
+    print(f\"Created 200 dummy videos in videos{shard}\")
+print(\"Done.\")
+"' --internal-ip
 
 # Step 4: Verify setup on all workers
 echo "--- Verifying setup on all workers ---"
 gcloud compute tpus tpu-vm ssh ${TPU_NAME} --zone=${ZONE} --worker=all \
   --command='
     echo "=== Worker $(hostname) ==="
-    python3 -c "import jax; print(f\"JAX {jax.__version__}, devices: {jax.local_device_count()}\")"
-    echo "Videos: $(find ~/data/videos -name \"*.mp4\" 2>/dev/null | wc -l)"
+    python3 -c "
+import os
+videos = []
+for d in [\"videos0/videos0\", \"videos1/videos1\"]:
+    p = os.path.expanduser(f\"~/data/videos/{d}\")
+    if os.path.isdir(p):
+        videos.extend([f for f in os.listdir(p) if f.endswith(\".mp4\")])
+print(f\"Videos: {len(videos)}\")
+"
     echo "Repo: $(ls ~/video-VAE/claude_distributed/distributed_train.py 2>/dev/null && echo OK || echo MISSING)"
   ' --internal-ip
 
