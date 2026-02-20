@@ -302,7 +302,12 @@ if __name__ == "__main__":
             "model": jax.tree.map(ocp.utils.to_shape_dtype_struct, nnx.state(model)),
             "optimizer": jax.tree.map(ocp.utils.to_shape_dtype_struct, nnx.state(optimizer)),
         }
-        restored = ocp.StandardCheckpointer().restore(path, abstract_state)
+        restored = ocp.StandardCheckpointer().restore(
+            path, abstract_state,
+            ocp.args.StandardRestore(
+                single_host_load_and_broadcast=True,
+            ),
+        )
         nnx.update(model, restored["model"])
         nnx.update(optimizer, restored["optimizer"])
 
