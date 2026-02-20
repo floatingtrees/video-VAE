@@ -528,6 +528,13 @@ if __name__ == "__main__":
                 save_video_to_gcs(local_batch_np,
                     f"{VIDEO_SAVE_DIR}/video_e{epoch}_s{i}_original.mp4", fps=30.0)
 
+            if global_step % 10000 == 0:
+                if process_index == 0:
+                    save_checkpoint(model, optimizer,
+                                    f"{model_save_path}/checkpoint_step_{global_step}")
+                    print(f"Saved checkpoint at global_step {global_step}", flush=True)
+                jax.experimental.multihost_utils.sync_global_devices(f"checkpoint_step_{global_step}")
+
         if _SHOULD_STOP:
             break
 
