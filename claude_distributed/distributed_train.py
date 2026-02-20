@@ -298,7 +298,9 @@ if __name__ == "__main__":
         # Convert to numpy to bypass orbax's JaxArrayHandler which has a
         # set_mesh context manager bug in orbax 0.11.33 + JAX 0.6.2.
         state = jax.tree.map(lambda x: np.array(x), state)
-        ocp.StandardCheckpointer().save(path, state)
+        ckptr = ocp.StandardCheckpointer()
+        ckptr.save(path, state)
+        ckptr.wait_until_finished()
 
     def load_checkpoint_fn(model, optimizer, path):
         abstract_state = {
