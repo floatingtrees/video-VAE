@@ -326,7 +326,7 @@ if __name__ == "__main__":
     patch_size = 16
     model = VideoVAE(
         height=height, width=width, channels=3, patch_size=patch_size,
-        encoder_depth=9, decoder_depth=12, mlp_dim=1536, num_heads=8,
+        encoder_depth=1 if IS_TEST else 9, decoder_depth=1 if IS_TEST else 12, mlp_dim=1536, num_heads=8,
         qkv_features=512, max_temporal_len=64,
         spatial_compression_rate=8, unembedding_upsample_rate=4,
         rngs=nnx.Rngs(2),
@@ -470,6 +470,8 @@ if __name__ == "__main__":
 
             if i > steps_per_epoch:
                 break
+            if IS_TEST and i >= 5:
+                break
             if i > NEGATIVE_PENALTY_TRAINING_STEPS:
                 hparams["max_compression_rate"] = 10000
 
@@ -521,7 +523,7 @@ if __name__ == "__main__":
                       f"time={elapsed:.1f}s "
                       f"global_step={global_step}", flush=True)
 
-            if i % 500 == 499:
+            if i % (3 if IS_TEST else 500) == (2 if IS_TEST else 499):
                 # All workers materialize arrays to match any implicit collectives
                 # (np.array on sharded JAX arrays can trigger all-gathers)
                 recon_local = np.array(aux["reconstruction"][:PER_DEVICE_BATCH_SIZE])
@@ -541,7 +543,7 @@ if __name__ == "__main__":
                 # Barrier so no worker races ahead during process 0's I/O
                 jax.experimental.multihost_utils.sync_global_devices(f"video_save_e{epoch}_s{i}")
 
-            if global_step % 10000 == 0:
+            if global_step % (3 if IS_TEST else 10000) == 0:
                 if process_index == 0:
                     save_checkpoint(model, optimizer,
                                     f"{model_save_path}/checkpoint_step_{global_step}")
