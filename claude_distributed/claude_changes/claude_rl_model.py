@@ -46,7 +46,7 @@ class Encoder(nnx.Module):
                 dtype=dtype,
                 param_dtype=param_dtype
             ))
-        self.layers = nnx.List(layers)
+        self.layers = layers
 
     def __call__(self, x: Float[Array, "b time height width channels"], mask: Float[Array, "b 1 1 time"], rngs: nnx.Rngs, train: bool = True):
         x = self.patch_embedding(x)
@@ -85,7 +85,7 @@ class Decoder(nnx.Module):
                 dtype=dtype,
                 param_dtype=param_dtype
             ))
-        self.layers = nnx.List(layers)
+        self.layers = layers
         self.unet = UNet(channels=channels * unembedding_upsample_rate, base_features=16, num_levels=3,
                          out_features=channels, rngs=rngs, dtype=dtype, param_dtype=param_dtype)
 

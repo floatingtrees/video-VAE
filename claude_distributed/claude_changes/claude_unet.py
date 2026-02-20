@@ -118,7 +118,7 @@ class UNet(nnx.Module):
                                         temporal_kernel=temporal_kernel,
                                         dtype=dtype, param_dtype=param_dtype))
             in_ch = out_ch
-        self.encoders = nnx.List(encoders)
+        self.encoders = encoders
 
         # Bottleneck
         bottleneck_ch = base_features * (2 ** num_levels)
@@ -138,7 +138,7 @@ class UNet(nnx.Module):
                                       temporal_kernel=temporal_kernel,
                                       dtype=dtype, param_dtype=param_dtype))
             in_ch = out_ch
-        self.decoders = nnx.List(decoders)
+        self.decoders = decoders
 
         # Final output conv (no activation, we want clean output)
         self.final_conv = nnx.Conv(

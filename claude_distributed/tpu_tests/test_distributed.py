@@ -24,6 +24,15 @@ import argparse
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", ".99")
 
+# flax 0.10.4 passes abstracted_axes to jax.jit which JAX 0.9.x removed.
+# Patch it out before any flax/nnx imports so nnx.jit works correctly.
+import jax as _jax
+_jax_jit_orig = _jax.jit
+def _jax_jit_patched(fn, **kwargs):
+    kwargs.pop('abstracted_axes', None)
+    return _jax_jit_orig(fn, **kwargs)
+_jax.jit = _jax_jit_patched
+
 import jax
 
 # ── Distributed init (mirrors claude_rl_nonadversarial.py) ───────────────────
@@ -243,7 +252,7 @@ def train_step(model, optimizer, video, mask, rngs):
     mask_4d = rearrange(mask, "b time -> b 1 1 time")
     grad_fn = nnx.value_and_grad(loss_fn, has_aux=True, argnums=nnx.DiffState(0, nnx.Param))
     (loss, aux), grads = grad_fn(model, video, mask_4d, original_mask, rngs)
-    optimizer.update(model, grads)
+    optimizer.update(grads)
     return loss, aux
 
 
