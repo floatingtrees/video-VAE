@@ -22,7 +22,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PARENT_DIR="$(dirname "$SCRIPT_DIR")"
 
-source "$PARENT_DIR/../venv/bin/activate"
+#source "$PARENT_DIR/../venv/bin/activate"
 
 # Both the parent (rl_model, dataloader, …) and claude_changes directories
 # must be on PYTHONPATH so imports resolve correctly.
