@@ -295,6 +295,9 @@ if __name__ == "__main__":
     # -------------------------------------------------------------------
     def save_checkpoint(model, optimizer, path):
         state = {"model": nnx.state(model), "optimizer": nnx.state(optimizer)}
+        # Convert to numpy to bypass orbax's JaxArrayHandler which has a
+        # set_mesh context manager bug in orbax 0.11.33 + JAX 0.6.2.
+        state = jax.tree.map(lambda x: np.array(x), state)
         ocp.StandardCheckpointer().save(path, state)
 
     def load_checkpoint_fn(model, optimizer, path):
