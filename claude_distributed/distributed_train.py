@@ -41,8 +41,10 @@ NEGATIVE_PENALTY_TRAINING_STEPS = 2000
 RLLossWeight = 0.01
 max_compression_rate = 2
 DATA_DIR = os.path.expanduser("~/data/videos")
-VIDEO_SAVE_DIR = "outputs"
-model_save_path = f"gs://tpus-487818-checkpoints/run{int(time.time())}/perceptual_loss_model"
+RUN_TIMESTAMP = int(time.time())
+GCS_RUN_DIR = f"gs://tpus-487818-checkpoints/run{RUN_TIMESTAMP}"
+VIDEO_SAVE_DIR = f"{GCS_RUN_DIR}/images"
+model_save_path = f"{GCS_RUN_DIR}/perceptual_loss_model"
 SHUFFLE = True
 NUM_WORKERS = 4
 PREFETCH_SIZE = 16
@@ -377,9 +379,17 @@ if __name__ == "__main__":
     global_step = 0
     start = time.perf_counter()
 
+    LOCAL_TMP_VIDEO_DIR = "/tmp/video_vae_videos"
     if process_index == 0:
-        os.makedirs(os.path.join(VIDEO_SAVE_DIR, "train"), exist_ok=True)
-        os.makedirs(os.path.join(VIDEO_SAVE_DIR, "eval"), exist_ok=True)
+        os.makedirs(LOCAL_TMP_VIDEO_DIR, exist_ok=True)
+
+    def save_video_to_gcs(batch_data, gcs_path, fps=30.0):
+        """Save video locally then upload to GCS."""
+        import subprocess
+        local_path = os.path.join(LOCAL_TMP_VIDEO_DIR, os.path.basename(gcs_path))
+        batch_to_video(batch_data, local_path, fps=fps)
+        subprocess.run(["gsutil", "-q", "cp", local_path, gcs_path], check=True)
+        os.remove(local_path)
 
     for epoch in range(NUM_EPOCHS):
         if _SHOULD_STOP:
@@ -388,10 +398,6 @@ if __name__ == "__main__":
                 save_checkpoint(model, optimizer, f"{model_save_path}/checkpoint_sigterm")
             jax.experimental.multihost_utils.sync_global_devices("sigterm_save")
             break
-
-        if process_index == 0:
-            os.makedirs(os.path.join(VIDEO_SAVE_DIR, f"train/epoch{epoch}"), exist_ok=True)
-            os.makedirs(os.path.join(VIDEO_SAVE_DIR, f"eval/epoch{epoch}"), exist_ok=True)
 
         max_frames_cap = 64
         min_batch_size = 1
@@ -494,12 +500,12 @@ if __name__ == "__main__":
             if process_index == 0 and i % 500 == 499:
                 recon_local = np.array(aux["reconstruction"][:PER_DEVICE_BATCH_SIZE])
                 recon_batch = {"video": recon_local, "mask": np.array(mask[:PER_DEVICE_BATCH_SIZE])}
-                batch_to_video(recon_batch, os.path.join(
-                    VIDEO_SAVE_DIR, f"train/epoch{epoch}/video_{i}_latent.mp4"), fps=30.0)
+                save_video_to_gcs(recon_batch,
+                    f"{VIDEO_SAVE_DIR}/video_e{epoch}_s{i}_latent.mp4", fps=30.0)
                 local_batch_np = {k: np.array(v[:PER_DEVICE_BATCH_SIZE])
                                   for k, v in global_batch.items()}
-                batch_to_video(local_batch_np, os.path.join(
-                    VIDEO_SAVE_DIR, f"train/epoch{epoch}/video_{i}_original.mp4"), fps=30.0)
+                save_video_to_gcs(local_batch_np,
+                    f"{VIDEO_SAVE_DIR}/video_e{epoch}_s{i}_original.mp4", fps=30.0)
 
         if _SHOULD_STOP:
             break
