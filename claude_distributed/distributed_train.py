@@ -302,10 +302,16 @@ if __name__ == "__main__":
             "model": jax.tree.map(ocp.utils.to_shape_dtype_struct, nnx.state(model)),
             "optimizer": jax.tree.map(ocp.utils.to_shape_dtype_struct, nnx.state(optimizer)),
         }
-        # Load on process 0 only to handle single-process checkpoints,
-        # then broadcast to all workers.
+        # Use the handler directly to bypass Checkpointer's completeness
+        # check, which fails when loading a single-process checkpoint in a
+        # multi-process environment.
         if process_index == 0:
-            restored = ocp.StandardCheckpointer().restore(path, abstract_state)
+            from etils import epath
+            handler = ocp.StandardCheckpointHandler()
+            restored = handler.restore(
+                epath.Path(path),
+                args=ocp.args.StandardRestore(abstract_state),
+            )
         else:
             restored = jax.tree.map(lambda x: np.zeros(x.shape, dtype=x.dtype), abstract_state)
         # Broadcast from process 0 to all
