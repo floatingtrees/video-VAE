@@ -416,8 +416,7 @@ if __name__ == "__main__":
         if _SHOULD_STOP:
             if process_index == 0:
                 print("SIGTERM received before epoch start, saving and exiting.")
-                save_checkpoint(model, optimizer, f"{model_save_path}/checkpoint_sigterm")
-            jax.experimental.multihost_utils.sync_global_devices("sigterm_save")
+            save_checkpoint(model, optimizer, f"{model_save_path}/checkpoint_sigterm")
             break
 
         max_frames_cap = 64
@@ -463,9 +462,8 @@ if __name__ == "__main__":
             if _SHOULD_STOP:
                 if process_index == 0:
                     print(f"SIGTERM received at step {i}, saving checkpoint and exiting.")
-                    save_checkpoint(model, optimizer,
-                                    f"{model_save_path}/checkpoint_sigterm_e{epoch}_s{i}")
-                jax.experimental.multihost_utils.sync_global_devices("sigterm_save_step")
+                save_checkpoint(model, optimizer,
+                                f"{model_save_path}/checkpoint_sigterm_e{epoch}_s{i}")
                 break
 
             if i > steps_per_epoch:
@@ -544,20 +542,18 @@ if __name__ == "__main__":
                 jax.experimental.multihost_utils.sync_global_devices(f"video_save_e{epoch}_s{i}")
 
             if global_step % (3 if IS_TEST else 10000) == 0:
+                save_checkpoint(model, optimizer,
+                                f"{model_save_path}/checkpoint_step_{global_step}")
                 if process_index == 0:
-                    save_checkpoint(model, optimizer,
-                                    f"{model_save_path}/checkpoint_step_{global_step}")
                     print(f"Saved checkpoint at global_step {global_step}", flush=True)
-                jax.experimental.multihost_utils.sync_global_devices(f"checkpoint_step_{global_step}")
 
         if _SHOULD_STOP:
             break
 
-        # Save checkpoint (process 0 only)
+        # Save checkpoint (orbax coordinates internally, all processes must call)
+        save_checkpoint(model, optimizer, f"{model_save_path}/checkpoint_{epoch}")
         if process_index == 0:
-            save_checkpoint(model, optimizer, f"{model_save_path}/checkpoint_{epoch}")
             print(f"Saved checkpoint for epoch {epoch}")
-        jax.experimental.multihost_utils.sync_global_devices(f"checkpoint_epoch_{epoch}")
 
     if process_index == 0:
         wandb.finish()
