@@ -521,19 +521,25 @@ if __name__ == "__main__":
                       f"time={elapsed:.1f}s "
                       f"global_step={global_step}", flush=True)
 
-            if process_index == 0 and i % 500 == 499:
-                try:
-                    recon_local = np.array(aux["reconstruction"][:PER_DEVICE_BATCH_SIZE])
-                    recon_batch = {"video": recon_local, "mask": np.array(mask[:PER_DEVICE_BATCH_SIZE])}
-                    save_video_to_gcs(recon_batch,
-                        f"{VIDEO_SAVE_DIR}/video_e{epoch}_s{i}_latent.mp4", fps=30.0)
-                    local_batch_np = {k: np.array(v[:PER_DEVICE_BATCH_SIZE])
-                                      for k, v in global_batch.items()}
-                    save_video_to_gcs(local_batch_np,
-                        f"{VIDEO_SAVE_DIR}/video_e{epoch}_s{i}_original.mp4", fps=30.0)
-                    print(f"  Saved videos at step {i}", flush=True)
-                except Exception as e:
-                    print(f"  WARNING: Video save failed at step {i}: {e}", flush=True)
+            if i % 500 == 499:
+                # All workers materialize arrays to match any implicit collectives
+                # (np.array on sharded JAX arrays can trigger all-gathers)
+                recon_local = np.array(aux["reconstruction"][:PER_DEVICE_BATCH_SIZE])
+                mask_local = np.array(mask[:PER_DEVICE_BATCH_SIZE])
+                batch_local = {k: np.array(v[:PER_DEVICE_BATCH_SIZE])
+                               for k, v in global_batch.items()}
+                if process_index == 0:
+                    try:
+                        recon_batch = {"video": recon_local, "mask": mask_local}
+                        save_video_to_gcs(recon_batch,
+                            f"{VIDEO_SAVE_DIR}/video_e{epoch}_s{i}_latent.mp4", fps=30.0)
+                        save_video_to_gcs(batch_local,
+                            f"{VIDEO_SAVE_DIR}/video_e{epoch}_s{i}_original.mp4", fps=30.0)
+                        print(f"  Saved videos at step {i}", flush=True)
+                    except Exception as e:
+                        print(f"  WARNING: Video save failed at step {i}: {e}", flush=True)
+                # Barrier so no worker races ahead during process 0's I/O
+                jax.experimental.multihost_utils.sync_global_devices(f"video_save_e{epoch}_s{i}")
 
             if global_step % 10000 == 0:
                 if process_index == 0:
