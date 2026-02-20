@@ -302,12 +302,14 @@ if __name__ == "__main__":
             "model": jax.tree.map(ocp.utils.to_shape_dtype_struct, nnx.state(model)),
             "optimizer": jax.tree.map(ocp.utils.to_shape_dtype_struct, nnx.state(optimizer)),
         }
-        restored = ocp.StandardCheckpointer().restore(
-            path, abstract_state,
-            ocp.args.StandardRestore(
-                single_host_load_and_broadcast=True,
-            ),
-        )
+        # Load on process 0 only to handle single-process checkpoints,
+        # then broadcast to all workers.
+        if process_index == 0:
+            restored = ocp.StandardCheckpointer().restore(path, abstract_state)
+        else:
+            restored = jax.tree.map(lambda x: np.zeros(x.shape, dtype=x.dtype), abstract_state)
+        # Broadcast from process 0 to all
+        restored = jax.experimental.multihost_utils.broadcast_one_to_all(restored)
         nnx.update(model, restored["model"])
         nnx.update(optimizer, restored["optimizer"])
 
