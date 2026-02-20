@@ -484,6 +484,9 @@ if __name__ == "__main__":
 
             global_step += 1
 
+            if i % 500 == 0:
+                print(f"  [worker {process_index}] heartbeat step={i} global_step={global_step}", flush=True)
+
             # Logging (process 0 only)
             if process_index == 0 and i % 50 == 0:
                 elapsed = time.perf_counter() - start
@@ -519,14 +522,18 @@ if __name__ == "__main__":
                       f"global_step={global_step}", flush=True)
 
             if process_index == 0 and i % 500 == 499:
-                recon_local = np.array(aux["reconstruction"][:PER_DEVICE_BATCH_SIZE])
-                recon_batch = {"video": recon_local, "mask": np.array(mask[:PER_DEVICE_BATCH_SIZE])}
-                save_video_to_gcs(recon_batch,
-                    f"{VIDEO_SAVE_DIR}/video_e{epoch}_s{i}_latent.mp4", fps=30.0)
-                local_batch_np = {k: np.array(v[:PER_DEVICE_BATCH_SIZE])
-                                  for k, v in global_batch.items()}
-                save_video_to_gcs(local_batch_np,
-                    f"{VIDEO_SAVE_DIR}/video_e{epoch}_s{i}_original.mp4", fps=30.0)
+                try:
+                    recon_local = np.array(aux["reconstruction"][:PER_DEVICE_BATCH_SIZE])
+                    recon_batch = {"video": recon_local, "mask": np.array(mask[:PER_DEVICE_BATCH_SIZE])}
+                    save_video_to_gcs(recon_batch,
+                        f"{VIDEO_SAVE_DIR}/video_e{epoch}_s{i}_latent.mp4", fps=30.0)
+                    local_batch_np = {k: np.array(v[:PER_DEVICE_BATCH_SIZE])
+                                      for k, v in global_batch.items()}
+                    save_video_to_gcs(local_batch_np,
+                        f"{VIDEO_SAVE_DIR}/video_e{epoch}_s{i}_original.mp4", fps=30.0)
+                    print(f"  Saved videos at step {i}", flush=True)
+                except Exception as e:
+                    print(f"  WARNING: Video save failed at step {i}: {e}", flush=True)
 
             if global_step % 10000 == 0:
                 if process_index == 0:
