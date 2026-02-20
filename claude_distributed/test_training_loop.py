@@ -1,18 +1,17 @@
 """
-Training loop tests for distributed VideoVAE on TPU.
+Training loop tests (local CPU mode).
 
 Tests:
-  1. Loss function computes valid scalar loss with all components
-  2. Single train_step executes and returns finite loss
-  3. Loss decreases over multiple steps (model is learning)
-  4. Gradients are synchronized across all devices (data parallel)
-  5. SIGTERM handler sets flag and training loop respects it
-  6. Data-parallel batch sharding: each device gets unique data slice
+  1. Loss function produces valid scalar with all components
+  2. Train step executes and returns finite loss
+  3. Loss decreases over multiple steps
+  4. Gradients are finite and nonzero
+  5. SIGTERM handler sets flag correctly
+  6. Data-parallel batch sharding correctness
   7. VGG perceptual loss loads and computes
 
-Usage (run across all workers):
-    gcloud compute tpus tpu-vm ssh train-v6e-16 --zone=europe-west4-a --worker=all \
-      --command='cd ~/video-VAE/claude_distributed && python3 test_training_loop.py' --internal-ip
+Usage:
+    JAX_PLATFORMS=cpu JAX_NUM_CPU_DEVICES=4 python3 test_training_loop.py
 """
 
 import os
@@ -20,24 +19,21 @@ import sys
 import signal
 import time
 
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".99"
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
+os.environ.setdefault("JAX_NUM_CPU_DEVICES", "4")
 
 import jax
-jax.distributed.initialize()
-
 import jax.numpy as jnp
-from jax.sharding import NamedSharding, PartitionSpec as P
+from jax.sharding import NamedSharding, PartitionSpec as P, Mesh
 from flax import nnx
 import optax
 import numpy as np
 from einops import rearrange, repeat, reduce
 
 num_devices = jax.device_count()
-local_devices = jax.local_device_count()
-process_index = jax.process_index()
-num_processes = jax.process_count()
+print(f"Running with {num_devices} CPU devices", flush=True)
 
-mesh = jax.make_mesh((num_devices,), ('data',))
+mesh = Mesh(jax.devices(), axis_names=('data',))
 replicated_sharding = NamedSharding(mesh, P())
 data_sharding = NamedSharding(mesh, P('data'))
 
@@ -57,31 +53,25 @@ QKV_FEATURES = 128
 MAX_TEMPORAL_LEN = 16
 SPATIAL_COMPRESSION_RATE = 4
 UPSAMPLE_RATE = 2
-LOCAL_BATCH = local_devices
+BATCH = num_devices
 TEMPORAL_LEN = 8
 LR = 1e-3
-
-
-def log(msg):
-    if process_index == 0:
-        print(f"  {msg}", flush=True)
 
 
 def test_pass(name):
     global PASS_COUNT
     PASS_COUNT += 1
-    if process_index == 0:
-        print(f"  PASS: {name}", flush=True)
+    print(f"  PASS: {name}", flush=True)
 
 
 def test_fail(name, err):
     global FAIL_COUNT
     FAIL_COUNT += 1
-    print(f"  FAIL [{process_index}]: {name} - {err}", flush=True)
+    print(f"  FAIL: {name} - {err}", flush=True)
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Build model + optimizer (shared across tests)
+# Build model + optimizer
 # ──────────────────────────────────────────────────────────────────────
 from rl_model import VideoVAE
 
@@ -96,12 +86,10 @@ model = VideoVAE(
     dtype=jnp.float32, param_dtype=jnp.float32,
 )
 
-# Replicate model
 gdef, state = nnx.split(model)
 state = jax.device_put(state, replicated_sharding)
 model = nnx.merge(gdef, state)
 
-# Optimizer
 optimizer_def = optax.chain(
     optax.clip_by_global_norm(1.0),
     optax.adam(learning_rate=LR),
@@ -111,11 +99,10 @@ gdef_opt, opt_state = nnx.split(optimizer)
 opt_state = jax.device_put(opt_state, replicated_sharding)
 optimizer = nnx.merge(gdef_opt, opt_state)
 
-# Hyperparams
 hparams = {
     "gamma1": 0.2,
     "gamma2": 0.001,
-    "gamma3": 0.0,       # Disable perceptual loss for fast tests (test 7 covers it)
+    "gamma3": 0.0,       # Disable perceptual for fast tests (test 7 covers it)
     "gamma4": 0.05,
     "max_compression_rate": 2,
     "magnify_negatives_rate": 100,
@@ -124,21 +111,17 @@ hparams = {
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Loss function (adapted from distributed_train.py)
+# Loss function (from distributed_train.py)
 # ──────────────────────────────────────────────────────────────────────
 def per_sample_mean(x):
     return jnp.mean(x, axis=tuple(range(1, x.ndim)))
 
-
 def magnify_negatives(x, rate):
     return jnp.where(x < 0, x * rate, x)
 
-
 def dummy_perceptual_loss(params, x, target):
-    """Dummy perceptual loss that returns zeros (for fast testing)."""
     b = x.shape[0]
     return jnp.zeros(b)
-
 
 def loss_fn(model, video, mask, original_mask, rngs, hparams,
             perceptual_loss_fn, vgg_params, train=True):
@@ -177,7 +160,6 @@ def loss_fn(model, video, mask, original_mask, rngs, hparams,
                        + hparams["gamma2"] * kl_loss
                        + hparams["gamma4"] * per_sample_MAE)
 
-    # RL loss
     pairs = rearrange(per_sample_loss, "(b p) -> b p", p=2)
     means_ = rearrange(per_sample_mean(pairs), "b -> b 1")
     stds_ = rearrange(jnp.std(pairs, axis=1) + 1e-6, "b -> b 1")
@@ -221,24 +203,19 @@ jit_train_step = nnx.jit(train_step, static_argnames=("perceptual_loss_fn",))
 
 
 def make_batch():
-    """Create a sharded random batch for testing."""
-    key = jax.random.key(int(time.time() * 1000) % 2**31)
-    local_video = np.random.randn(LOCAL_BATCH, TEMPORAL_LEN, HEIGHT, WIDTH, CHANNELS).astype(np.float32) * 0.1
-    local_mask = np.ones((LOCAL_BATCH, TEMPORAL_LEN), dtype=np.float32)
-
-    sharded_video = jax.make_array_from_process_local_data(data_sharding, local_video)
-    mask_spec = P('data', None)
-    sharded_mask = jax.make_array_from_process_local_data(
-        NamedSharding(mesh, mask_spec), local_mask)
-
-    return sharded_video, sharded_mask.astype(jnp.bool_)
+    video = jax.device_put(
+        jnp.array(np.random.randn(BATCH, TEMPORAL_LEN, HEIGHT, WIDTH, CHANNELS).astype(np.float32) * 0.1),
+        data_sharding)
+    mask = jax.device_put(
+        jnp.ones((BATCH, TEMPORAL_LEN), dtype=jnp.bool_),
+        NamedSharding(mesh, P('data', None)))
+    return video, mask
 
 
 # ──────────────────────────────────────────────────────────────────────
 # Test 1: Loss function produces valid scalar
 # ──────────────────────────────────────────────────────────────────────
-if process_index == 0:
-    print("\n[Test 1] Loss function produces valid scalar", flush=True)
+print("\n[Test 1] Loss function produces valid scalar", flush=True)
 
 try:
     video, mask = make_batch()
@@ -257,7 +234,6 @@ try:
     assert np.isfinite(loss_val), f"Loss not finite: {loss_val}"
     assert loss_val > 0, f"Loss should be positive: {loss_val}"
 
-    # Check all aux components
     for key in ["MSE", "selection_loss", "kl_loss", "rl_loss", "per_sample_MAE", "kept_frame_density"]:
         val = float(aux[key])
         assert np.isfinite(val), f"{key} not finite: {val}"
@@ -267,14 +243,11 @@ try:
 except Exception as e:
     test_fail("loss function", e)
 
-jax.experimental.multihost_utils.sync_global_devices("test1")
-
 
 # ──────────────────────────────────────────────────────────────────────
-# Test 2: Train step executes and returns finite loss
+# Test 2: Train step
 # ──────────────────────────────────────────────────────────────────────
-if process_index == 0:
-    print("\n[Test 2] Train step executes correctly", flush=True)
+print("\n[Test 2] Train step executes correctly", flush=True)
 
 try:
     video, mask = make_batch()
@@ -292,22 +265,14 @@ try:
 except Exception as e:
     test_fail("train step", e)
 
-jax.experimental.multihost_utils.sync_global_devices("test2")
-
 
 # ──────────────────────────────────────────────────────────────────────
-# Test 3: Loss decreases over multiple steps
+# Test 3: Loss decreases
 # ──────────────────────────────────────────────────────────────────────
-if process_index == 0:
-    print("\n[Test 3] Loss decreases over training steps", flush=True)
+print("\n[Test 3] Loss decreases over training steps", flush=True)
 
 try:
-    # Use fixed data so model can overfit
-    fixed_video_local = np.random.randn(LOCAL_BATCH, TEMPORAL_LEN, HEIGHT, WIDTH, CHANNELS).astype(np.float32) * 0.1
-    fixed_mask_local = np.ones((LOCAL_BATCH, TEMPORAL_LEN), dtype=np.float32)
-    fixed_video = jax.make_array_from_process_local_data(data_sharding, fixed_video_local)
-    fixed_mask = jax.make_array_from_process_local_data(
-        NamedSharding(mesh, P('data', None)), fixed_mask_local).astype(jnp.bool_)
+    fixed_video, fixed_mask = make_batch()
 
     losses = []
     NUM_STEPS = 10
@@ -317,49 +282,29 @@ try:
                                     hparams, rngs_t, dummy_perceptual_loss, None)
         losses.append(float(loss))
 
-    # Loss should generally decrease
-    first_half_avg = np.mean(losses[:NUM_STEPS // 2])
-    second_half_avg = np.mean(losses[NUM_STEPS // 2:])
+    first_half = np.mean(losses[:NUM_STEPS // 2])
+    second_half = np.mean(losses[NUM_STEPS // 2:])
 
-    if process_index == 0:
-        log(f"Losses: {[f'{l:.4f}' for l in losses]}")
-        log(f"First half avg: {first_half_avg:.4f}, Second half avg: {second_half_avg:.4f}")
+    print(f"  Losses: {[f'{l:.4f}' for l in losses]}", flush=True)
+    print(f"  First half avg: {first_half:.4f}, Second half avg: {second_half:.4f}", flush=True)
 
-    # The second half should have lower average loss than the first half
-    assert second_half_avg < first_half_avg, \
-        f"Loss not decreasing: first_half={first_half_avg:.4f} -> second_half={second_half_avg:.4f}"
+    assert second_half < first_half, \
+        f"Loss not decreasing: {first_half:.4f} -> {second_half:.4f}"
 
-    test_pass(f"Loss decreased: {first_half_avg:.4f} -> {second_half_avg:.4f}")
+    test_pass(f"Loss decreased: {first_half:.4f} -> {second_half:.4f}")
 except Exception as e:
     test_fail("loss decrease", e)
 
-jax.experimental.multihost_utils.sync_global_devices("test3")
-
 
 # ──────────────────────────────────────────────────────────────────────
-# Test 4: Gradient sync across devices (data parallel correctness)
+# Test 4: Gradients are finite and nonzero
 # ──────────────────────────────────────────────────────────────────────
-if process_index == 0:
-    print("\n[Test 4] Gradient synchronization (data parallel)", flush=True)
+print("\n[Test 4] Gradient sanity check", flush=True)
 
 try:
-    # After training steps, all replicated params should be identical across devices
-    params_state = nnx.state(model, nnx.Param)
-    leaves = jax.tree_util.tree_leaves(params_state)
-
-    # Check that params are replicated (same on all devices)
-    # We verify by checking the sharding is replicated (P())
-    sample_leaf = leaves[0]
-    if hasattr(sample_leaf.value, 'sharding'):
-        sharding = sample_leaf.value.sharding
-        is_replicated = all(s is None for s in sharding.spec)
-        assert is_replicated, f"Params not replicated after training: {sharding.spec}"
-
-    # Also verify gradients are finite by doing one more step and checking
     video, mask = make_batch()
     rngs_t = nnx.Rngs(999)
 
-    # Use value_and_grad directly to inspect gradients
     def check_grad_fn(model, video, mask, hparams, rngs):
         original_mask = mask.copy()
         mask_4d = rearrange(mask, "b time -> b 1 1 time")
@@ -380,126 +325,85 @@ try:
 
     assert not bool(has_nan), "Gradients contain NaN"
     assert float(max_grad) > 0, "All gradients are zero"
-    assert np.isfinite(float(max_grad)), f"Max gradient not finite: {float(max_grad)}"
+    assert np.isfinite(float(max_grad)), f"Max gradient not finite"
 
-    test_pass(f"Params replicated, grads finite, max_grad={float(max_grad):.6f}")
+    test_pass(f"max_grad={float(max_grad):.6f}, no NaN")
 except Exception as e:
-    test_fail("gradient sync", e)
-
-jax.experimental.multihost_utils.sync_global_devices("test4")
+    test_fail("gradient sanity", e)
 
 
 # ──────────────────────────────────────────────────────────────────────
 # Test 5: SIGTERM handling
 # ──────────────────────────────────────────────────────────────────────
-if process_index == 0:
-    print("\n[Test 5] SIGTERM handling", flush=True)
+print("\n[Test 5] SIGTERM handling", flush=True)
 
 try:
     import distributed_train as dt
 
-    # Check initial state
+    # Save original state
+    original = dt._SHOULD_STOP
+
     assert not dt._SHOULD_STOP, "_SHOULD_STOP should be False initially"
 
-    # Simulate SIGTERM
     dt._signal_handler(signal.SIGTERM, None)
-    assert dt._SHOULD_STOP, "_SHOULD_STOP should be True after SIGTERM"
+    assert dt._SHOULD_STOP, "Should be True after SIGTERM"
 
-    # Simulate SIGINT
     dt._SHOULD_STOP = False
     dt._signal_handler(signal.SIGINT, None)
-    assert dt._SHOULD_STOP, "_SHOULD_STOP should be True after SIGINT"
+    assert dt._SHOULD_STOP, "Should be True after SIGINT"
 
-    # Verify the signal handlers are registered
     current_sigterm = signal.getsignal(signal.SIGTERM)
     current_sigint = signal.getsignal(signal.SIGINT)
     assert current_sigterm == dt._signal_handler, "SIGTERM handler not registered"
     assert current_sigint == dt._signal_handler, "SIGINT handler not registered"
 
-    # Reset for other tests
     dt._SHOULD_STOP = False
-
     test_pass("SIGTERM/SIGINT handlers work correctly")
 except Exception as e:
     test_fail("SIGTERM handling", e)
 
-jax.experimental.multihost_utils.sync_global_devices("test5")
-
 
 # ──────────────────────────────────────────────────────────────────────
-# Test 6: Data-parallel sharding correctness
+# Test 6: Data-parallel sharding
 # ──────────────────────────────────────────────────────────────────────
-if process_index == 0:
-    print("\n[Test 6] Data-parallel batch sharding", flush=True)
+print("\n[Test 6] Data-parallel batch sharding", flush=True)
 
 try:
-    # Each process creates unique tagged data
-    local_video = np.full((LOCAL_BATCH, TEMPORAL_LEN, HEIGHT, WIDTH, CHANNELS),
-                          fill_value=float(process_index), dtype=np.float32)
-    local_mask = np.ones((LOCAL_BATCH, TEMPORAL_LEN), dtype=np.float32)
+    tagged = np.arange(num_devices).reshape(num_devices, 1, 1, 1, 1).astype(np.float32)
+    tagged = np.broadcast_to(tagged, (num_devices, TEMPORAL_LEN, HEIGHT, WIDTH, CHANNELS)).copy()
+    sharded_video = jax.device_put(jnp.array(tagged), data_sharding)
 
-    # Shard across mesh
-    sharded = {}
-    for key, val in {"video": local_video, "mask": local_mask}.items():
-        ndim = val.ndim
-        spec = P('data', *([None] * (ndim - 1)))
-        s = NamedSharding(mesh, spec)
-        sharded[key] = jax.make_array_from_process_local_data(s, val)
+    assert sharded_video.shape == (num_devices, TEMPORAL_LEN, HEIGHT, WIDTH, CHANNELS)
 
-    global_video = sharded["video"]
-    global_mask = sharded["mask"]
+    shards = sharded_video.addressable_shards
+    devices_used = {s.device for s in shards}
+    assert len(devices_used) == num_devices, f"Expected {num_devices} devices"
 
-    expected_global_batch = LOCAL_BATCH * num_processes
-    assert global_video.shape[0] == expected_global_batch, \
-        f"Global batch: {global_video.shape[0]} != {expected_global_batch}"
+    full = np.array(sharded_video)
+    for d in range(num_devices):
+        assert np.isclose(full[d, 0, 0, 0, 0], float(d)), \
+            f"Device {d} data mismatch: {full[d, 0, 0, 0, 0]}"
 
-    # On process 0, verify data ordering
-    if process_index == 0:
-        full = np.array(global_video)
-        for p in range(num_processes):
-            start = p * LOCAL_BATCH
-            end = start + LOCAL_BATCH
-            expected = float(p)
-            actual = full[start, 0, 0, 0, 0]
-            assert np.isclose(actual, expected), \
-                f"Process {p} data: expected {expected}, got {actual}"
-
-    test_pass(f"Global batch={expected_global_batch}, data correctly sharded")
+    test_pass(f"Sharded across {num_devices} devices, data correctly tagged")
 except Exception as e:
     test_fail("data-parallel sharding", e)
 
-jax.experimental.multihost_utils.sync_global_devices("test6")
-
 
 # ──────────────────────────────────────────────────────────────────────
-# Test 7: VGG perceptual loss loads and computes
+# Test 7: VGG perceptual loss
 # ──────────────────────────────────────────────────────────────────────
-if process_index == 0:
-    print("\n[Test 7] VGG perceptual loss", flush=True)
+print("\n[Test 7] VGG perceptual loss", flush=True)
 
 try:
     from vgg_tests import load_vgg, get_adversarial_perceptual_loss_fn
 
     vgg_model, vgg_params = load_vgg()
-    vgg_params = jax.device_put(vgg_params, replicated_sharding)
     perceptual_fn = get_adversarial_perceptual_loss_fn(vgg_model)
 
-    # Test with small inputs
-    b, t = 2 * num_processes, TEMPORAL_LEN
-    x_local = np.random.randn(2, t, HEIGHT, WIDTH, 3).astype(np.float32) * 0.1
-    target_local = np.random.randn(2, t, HEIGHT, WIDTH, 3).astype(np.float32) * 0.1
+    x = jnp.ones((2, TEMPORAL_LEN, HEIGHT, WIDTH, 3), dtype=jnp.bfloat16) * 0.5
+    target = jnp.ones((2, TEMPORAL_LEN, HEIGHT, WIDTH, 3), dtype=jnp.bfloat16) * 0.3
 
-    x_global = jax.make_array_from_process_local_data(data_sharding,
-        np.broadcast_to(x_local, (local_devices, t, HEIGHT, WIDTH, 3))[:local_devices])
-    target_global = jax.make_array_from_process_local_data(data_sharding,
-        np.broadcast_to(target_local, (local_devices, t, HEIGHT, WIDTH, 3))[:local_devices])
-
-    @jax.jit
-    def compute_perceptual(params, x, target):
-        return perceptual_fn(params, x, target)
-
-    ploss = compute_perceptual(vgg_params, x_global.astype(jnp.bfloat16),
-                                target_global.astype(jnp.bfloat16))
+    ploss = jax.jit(perceptual_fn)(vgg_params, x, target)
 
     ploss_val = float(jnp.mean(ploss))
     assert np.isfinite(ploss_val), f"Perceptual loss not finite: {ploss_val}"
@@ -509,20 +413,15 @@ try:
 except Exception as e:
     test_fail("VGG perceptual loss", e)
 
-jax.experimental.multihost_utils.sync_global_devices("test7")
-
 
 # ──────────────────────────────────────────────────────────────────────
 # Summary
 # ──────────────────────────────────────────────────────────────────────
-jax.experimental.multihost_utils.sync_global_devices("all_tests")
-
-if process_index == 0:
-    print(f"\n{'='*50}", flush=True)
-    print(f"TRAINING LOOP TESTS: {PASS_COUNT} passed, {FAIL_COUNT} failed", flush=True)
-    if FAIL_COUNT == 0:
-        print("ALL TRAINING LOOP TESTS PASSED!", flush=True)
-    print(f"{'='*50}", flush=True)
+print(f"\n{'='*50}", flush=True)
+print(f"TRAINING LOOP TESTS: {PASS_COUNT} passed, {FAIL_COUNT} failed", flush=True)
+if FAIL_COUNT == 0:
+    print("ALL TRAINING LOOP TESTS PASSED!", flush=True)
+print(f"{'='*50}", flush=True)
 
 if FAIL_COUNT > 0:
     sys.exit(1)

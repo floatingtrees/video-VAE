@@ -83,6 +83,7 @@ if __name__ == "__main__":
     from dataloader import create_batched_dataloader, batch_to_video
     from vgg_tests import get_adversarial_perceptual_loss_fn, load_vgg
     import orbax.checkpoint as ocp
+    import wandb
 
     # -------------------------------------------------------------------
     # Distributed topology
@@ -134,6 +135,35 @@ if __name__ == "__main__":
         print(f"Data dir: {DATA_DIR}")
         print(f"Num devices: {num_devices}, Num processes: {num_processes}, "
               f"Local devices: {local_devices}")
+
+    # -------------------------------------------------------------------
+    # Wandb (process 0 only)
+    # -------------------------------------------------------------------
+    if process_index == 0:
+        wandb.init(
+            project="distributed-video-vae",
+            config={
+                "num_epochs": NUM_EPOCHS,
+                "per_device_batch_size": PER_DEVICE_BATCH_SIZE,
+                "local_batch_size": LOCAL_BATCH_SIZE,
+                "global_batch_size": GLOBAL_BATCH_SIZE,
+                "max_frames": MAX_FRAMES,
+                "learning_rate": LEARNING_RATE,
+                "decay_steps": DECAY_STEPS,
+                "warmup_steps": WARMUP_STEPS,
+                "gamma1_selection": GAMMA1,
+                "gamma2_kl": GAMMA2,
+                "gamma3_perceptual": GAMMA3,
+                "gamma4_mae": GAMMA4,
+                "rl_loss_weight": RLLossWeight,
+                "max_compression_rate": max_compression_rate,
+                "magnify_negatives_rate": MAGNIFY_NEGATIVES_RATE,
+                "num_devices": num_devices,
+                "num_processes": num_processes,
+                "resize": RESIZE,
+                "seed": SEED,
+            },
+        )
 
     # -------------------------------------------------------------------
     # Helpers
@@ -429,14 +459,34 @@ if __name__ == "__main__":
             # Logging (process 0 only)
             if process_index == 0 and i % 50 == 0:
                 elapsed = time.perf_counter() - start
-                print(f"  Step {i}: loss={float(loss):.4f} "
-                      f"MSE={float(aux['MSE']):.4f} "
-                      f"perceptual={float(aux['perceptual_loss']):.4f} "
-                      f"sel={float(aux['selection_loss']):.4f} "
-                      f"kl={float(aux['kl_loss']):.4f} "
-                      f"density={float(aux['kept_frame_density']):.4f} "
-                      f"rl={float(aux['rl_loss']):.4f} "
-                      f"MAE={float(aux['per_sample_MAE']):.4f} "
+                log_dict = {
+                    "loss": float(loss),
+                    "MSE": float(aux["MSE"]),
+                    "perceptual_loss": float(aux["perceptual_loss"]),
+                    "selection_loss": float(aux["selection_loss"]),
+                    "kl_loss": float(aux["kl_loss"]),
+                    "kept_frame_density": float(aux["kept_frame_density"]),
+                    "mean_trajectory_prob": float(aux["mean_trajectory_prob"]),
+                    "rl_loss": float(aux["rl_loss"]),
+                    "MAE": float(aux["per_sample_MAE"]),
+                    "epoch": epoch,
+                    "step_in_epoch": i,
+                    "global_step": global_step,
+                    "elapsed_time": elapsed,
+                    "effective_batch_size": effective_batch_size,
+                    "effective_max_frames": effective_max_frames,
+                    "learning_rate": float(schedule_fn(global_step)),
+                }
+                wandb.log(log_dict, step=global_step)
+                print(f"  Step {i}: loss={log_dict['loss']:.4f} "
+                      f"MSE={log_dict['MSE']:.4f} "
+                      f"perceptual={log_dict['perceptual_loss']:.4f} "
+                      f"sel={log_dict['selection_loss']:.4f} "
+                      f"kl={log_dict['kl_loss']:.4f} "
+                      f"density={log_dict['kept_frame_density']:.4f} "
+                      f"rl={log_dict['rl_loss']:.4f} "
+                      f"MAE={log_dict['MAE']:.4f} "
+                      f"lr={log_dict['learning_rate']:.2e} "
                       f"time={elapsed:.1f}s "
                       f"global_step={global_step}", flush=True)
 
@@ -460,4 +510,5 @@ if __name__ == "__main__":
         jax.experimental.multihost_utils.sync_global_devices(f"checkpoint_epoch_{epoch}")
 
     if process_index == 0:
+        wandb.finish()
         print("Training complete!")
