@@ -16,57 +16,36 @@ Usage:
 """
 
 import os
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".99"
-
-import jax
-jax.distributed.initialize()
-
-import jax.numpy as jnp
-from jax.sharding import NamedSharding, PartitionSpec as P
-from flax import nnx
-import optax
 import numpy as np
 import time
 import argparse
-from einops import rearrange, repeat, reduce
-from jaxtyping import Float, Array
 
-from rl_model import VideoVAE
-from dataloader import create_batched_dataloader
-
-# ---------------------------------------------------------------------------
-# Topology
-# ---------------------------------------------------------------------------
-num_devices = jax.device_count()
-local_devices = jax.local_device_count()
-process_index = jax.process_index()
-num_processes = jax.process_count()
-
-mesh = jax.make_mesh((num_devices,), ('data',))
-replicated_sharding = NamedSharding(mesh, P())
-data_sharding = NamedSharding(mesh, P('data'))
+# NOTE: jax.distributed.initialize() and all JAX device access must be inside
+# __main__ to avoid conflicts with Grain's multiprocessing workers.
 
 PASS = "\033[92mPASS\033[0m"
 FAIL = "\033[91mFAIL\033[0m"
 all_passed = True
 
 
-def log(msg):
+def log(msg, process_index):
     if process_index == 0:
         print(msg)
 
 
-def check(name, condition):
+def check(name, condition, process_index):
     global all_passed
     status = PASS if condition else FAIL
     if not condition:
         all_passed = False
-    log(f"  [{status}] {name}")
+    log(f"  [{status}] {name}", process_index)
     return condition
 
 
-def shard_batch(batch: dict, mesh) -> dict:
+def shard_batch(batch, mesh):
     """Convert per-process numpy batch to globally sharded jax.Arrays."""
+    import jax
+    from jax.sharding import NamedSharding, PartitionSpec as P
     sharded = {}
     for key, val in batch.items():
         ndim = val.ndim
@@ -79,35 +58,35 @@ def shard_batch(batch: dict, mesh) -> dict:
 # ===================================================================
 # TEST 1: Device discovery
 # ===================================================================
-def test_device_discovery():
-    log("\n=== Test 1: Device Discovery ===")
-    check("Found at least 1 device", num_devices >= 1)
+def test_device_discovery(jax, num_devices, local_devices, num_processes, process_index):
+    log("\n=== Test 1: Device Discovery ===", process_index)
+    check("Found at least 1 device", num_devices >= 1, process_index)
     check(f"Device count ({num_devices}) == local ({local_devices}) * procs ({num_processes})",
-          num_devices == local_devices * num_processes)
+          num_devices == local_devices * num_processes, process_index)
     check("All devices are TPU or GPU (not CPU-only for prod)",
           "Tpu" in str(type(jax.devices()[0])) or "Gpu" in str(type(jax.devices()[0]))
-          or num_devices >= 2)  # allow CPU for CI
-    log(f"  Devices: {jax.devices()}")
+          or num_devices >= 2, process_index)
+    log(f"  Devices: {jax.devices()}", process_index)
 
 
 # ===================================================================
 # TEST 2: Data sharding across devices
 # ===================================================================
-def test_data_sharding():
-    log("\n=== Test 2: Data Sharding ===")
+def test_data_sharding(jax, mesh, num_devices, process_index):
+    from jax.sharding import NamedSharding, PartitionSpec as P
 
-    # Create synthetic data: each sample has a unique ID in the first element
-    local_batch_size = num_devices  # one sample per device globally
-    per_process = local_batch_size  # single-host: all local
+    log("\n=== Test 2: Data Sharding ===", process_index)
+
+    per_process = num_devices  # one sample per device globally
     data = np.arange(per_process * 4, dtype=np.float32).reshape(per_process, 4)
     spec = P('data', None)
     s = NamedSharding(mesh, spec)
     global_arr = jax.make_array_from_process_local_data(s, data)
 
-    check("Global shape matches", global_arr.shape == (local_batch_size, 4))
-    check(f"Has {num_devices} addressable shards", len(global_arr.addressable_shards) == num_devices)
+    check("Global shape matches", global_arr.shape == (per_process, 4), process_index)
+    check(f"Has {num_devices} addressable shards",
+          len(global_arr.addressable_shards) == num_devices, process_index)
 
-    # Verify each shard has different data
     shard_first_elems = []
     for shard in global_arr.addressable_shards:
         shard_data = np.array(shard.data)
@@ -115,16 +94,22 @@ def test_data_sharding():
 
     unique_values = len(set(shard_first_elems))
     check(f"All {num_devices} shards have different data (got {unique_values} unique)",
-          unique_values == num_devices)
+          unique_values == num_devices, process_index)
 
 
 # ===================================================================
 # TEST 3: Gradient synchronization with tiny model
 # ===================================================================
-def test_gradient_sync():
-    log("\n=== Test 3: Gradient Synchronization ===")
+def test_gradient_sync(jax, mesh, replicated_sharding, num_devices, process_index):
+    import jax.numpy as jnp
+    from jax.sharding import NamedSharding, PartitionSpec as P
+    from flax import nnx
+    import optax
+    from einops import rearrange, repeat
+    from rl_model import VideoVAE
 
-    # Tiny model for fast testing
+    log("\n=== Test 3: Gradient Synchronization ===", process_index)
+
     model = VideoVAE(
         height=32, width=32, channels=3, patch_size=8,
         encoder_depth=1, decoder_depth=1,
@@ -134,7 +119,6 @@ def test_gradient_sync():
         rngs=nnx.Rngs(42), dtype=jnp.float32, param_dtype=jnp.float32,
     )
 
-    # Replicate model
     gdef, state = nnx.split(model)
     state = jax.device_put(state, replicated_sharding)
     model = nnx.merge(gdef, state)
@@ -145,17 +129,14 @@ def test_gradient_sync():
     opt_state = jax.device_put(opt_state, replicated_sharding)
     optimizer = nnx.merge(gdef_opt, opt_state)
 
-    # Each device gets different data
-    per_process_batch = num_devices  # 1 sample per device
+    per_process_batch = num_devices
     video_np = np.random.randn(per_process_batch, 4, 32, 32, 3).astype(np.float32) * 0.02
-    mask_np = np.ones((per_process_batch, 4), dtype=np.float32)
+    mask_np = np.ones((per_process_batch, 4), dtype=np.bool_)
 
     video = jax.make_array_from_process_local_data(
         NamedSharding(mesh, P('data', None, None, None, None)), video_np)
     mask = jax.make_array_from_process_local_data(
         NamedSharding(mesh, P('data', None)), mask_np)
-
-    hw = 32 // 8 * 32 // 8  # = 16
 
     def simple_loss(model, video, mask, rngs):
         mask_expanded = rearrange(mask, "b time -> b 1 1 time")
@@ -173,16 +154,14 @@ def test_gradient_sync():
 
     rngs = nnx.Rngs(0)
     loss0 = float(jit_step(model, optimizer, video, mask, rngs))
-    log(f"  Step 0 loss: {loss0:.6f}")
+    log(f"  Step 0 loss: {loss0:.6f}", process_index)
 
-    # After the step, verify params are still replicated
     param_state = nnx.state(model, nnx.Param)
     first_leaf = jax.tree_util.tree_leaves(param_state)[0]
     param_sharding = first_leaf.sharding
     check("Params remain replicated after update",
-          all(s is None for s in param_sharding.spec))
+          all(s is None for s in param_sharding.spec), process_index)
 
-    # Run a few more steps and verify loss changes
     losses = [loss0]
     for step in range(4):
         video_np = np.random.randn(per_process_batch, 4, 32, 32, 3).astype(np.float32) * 0.02
@@ -190,31 +169,32 @@ def test_gradient_sync():
             NamedSharding(mesh, P('data', None, None, None, None)), video_np)
         l = float(jit_step(model, optimizer, video, mask, rngs))
         losses.append(l)
-    log(f"  Losses over 5 steps: {[f'{l:.6f}' for l in losses]}")
-    check("Training produced finite losses", all(np.isfinite(l) for l in losses))
+    log(f"  Losses over 5 steps: {[f'{l:.6f}' for l in losses]}", process_index)
+    check("Training produced finite losses", all(np.isfinite(l) for l in losses), process_index)
 
 
 # ===================================================================
 # TEST 4: Real dataloader with different shards per device
 # ===================================================================
-def test_dataloader_sharding(data_dir):
-    log("\n=== Test 4: Dataloader Sharding ===")
+def test_dataloader_sharding(jax, mesh, num_devices, local_devices, num_processes, process_index, data_dir):
+    from dataloader import create_batched_dataloader
+
+    log("\n=== Test 4: Dataloader Sharding ===", process_index)
 
     if not os.path.isdir(data_dir):
-        log(f"  [SKIP] Data directory not found: {data_dir}")
+        log(f"  [SKIP] Data directory not found: {data_dir}", process_index)
         return
 
-    # Load 2 batches with batch_size = num_devices (1 per device)
-    batch_size = max(local_devices, 2)  # at least 2 for the dataloader
+    batch_size = max(local_devices, 2)
 
     loader = create_batched_dataloader(
         base_dir=data_dir,
         batch_size=batch_size,
-        max_frames=8,  # small for speed
-        resize=(64, 64),  # small for speed
+        max_frames=8,
+        resize=(64, 64),
         shuffle=True,
         num_workers=2,
-        prefetch_size=2,
+        prefetch_size=4,
         drop_remainder=True,
         seed=42,
     )
@@ -226,9 +206,8 @@ def test_dataloader_sharding(data_dir):
         video = global_batch["video"]
 
         check(f"Batch {batches_seen}: global shape = ({batch_size * num_processes}, 8, 64, 64, 3)",
-              video.shape == (batch_size * num_processes, 8, 64, 64, 3))
+              video.shape == (batch_size * num_processes, 8, 64, 64, 3), process_index)
 
-        # Check each shard has different content
         checksums = []
         for shard in video.addressable_shards:
             shard_data = np.array(shard.data)
@@ -238,29 +217,34 @@ def test_dataloader_sharding(data_dir):
         unique = len(set(f"{c:.4f}" for c in checksums))
         check(f"Batch {batches_seen}: all {len(checksums)} device shards have different video data "
               f"({unique} unique checksums)",
-              unique == len(checksums))
+              unique == len(checksums), process_index)
 
         batches_seen += 1
         if batches_seen >= 2:
             break
 
-    check(f"Loaded {batches_seen} batches successfully", batches_seen == 2)
+    check(f"Loaded {batches_seen} batches successfully", batches_seen == 2, process_index)
 
-    # Check that batch 0 and batch 1 have different data
     if len(shard_checksums) == 2:
         batch0_sum = sum(shard_checksums[0])
         batch1_sum = sum(shard_checksums[1])
         check("Different batches have different data",
-              abs(batch0_sum - batch1_sum) > 1e-3)
+              abs(batch0_sum - batch1_sum) > 1e-3, process_index)
 
 
 # ===================================================================
 # TEST 5: End-to-end training with full loss function
 # ===================================================================
-def test_end_to_end_training():
-    log("\n=== Test 5: End-to-End Training (tiny model, synthetic data) ===")
-
+def test_end_to_end_training(jax, mesh, replicated_sharding, num_devices, process_index):
+    import jax.numpy as jnp
+    from jax.sharding import NamedSharding, PartitionSpec as P
+    from flax import nnx
+    import optax
+    from einops import rearrange, repeat, reduce
+    from rl_model import VideoVAE
     from vgg_tests import get_adversarial_perceptual_loss_fn, load_vgg
+
+    log("\n=== Test 5: End-to-End Training (tiny model, synthetic data) ===", process_index)
 
     H, W = 32, 32
     PATCH = 8
@@ -276,7 +260,6 @@ def test_end_to_end_training():
         rngs=nnx.Rngs(42), dtype=jnp.float32, param_dtype=jnp.float32,
     )
 
-    # Replicate
     gdef, state = nnx.split(model)
     state = jax.device_put(state, replicated_sharding)
     model = nnx.merge(gdef, state)
@@ -292,7 +275,6 @@ def test_end_to_end_training():
     opt_state = jax.device_put(opt_state, replicated_sharding)
     optimizer = nnx.merge(gdef_opt, opt_state)
 
-    # VGG for perceptual loss
     vgg_model, vgg_params = load_vgg()
     vgg_params = jax.device_put(vgg_params, replicated_sharding)
     perceptual_loss_fn = get_adversarial_perceptual_loss_fn(vgg_model)
@@ -338,19 +320,17 @@ def test_end_to_end_training():
         loss = jnp.mean(psl)
         return loss, {"MSE": jnp.mean(mse), "reconstruction": reconstruction}
 
-    def train_step(model, optimizer, video, mask, hparams, hw, rngs,
+    def train_step(model, optimizer, video, mask, hparams, rngs,
                    perceptual_loss_fn, vgg_params):
         original_mask = mask.copy()
         mask = rearrange(mask, "b time -> b 1 1 time")
-        mask = repeat(mask, "b 1 1 time -> b hw 1 1 time", hw=hw)
-        mask = rearrange(mask, "b hw 1 1 time -> (b hw) 1 1 time")
         grad_fn = nnx.value_and_grad(full_loss_fn, has_aux=True)
         (loss, aux), grads = grad_fn(model, video, mask, original_mask, rngs, hparams,
                                      perceptual_loss_fn, vgg_params)
         optimizer.update(grads)
         return loss, aux
 
-    jit_step = nnx.jit(train_step, static_argnames=("hw", "perceptual_loss_fn"))
+    jit_step = nnx.jit(train_step, static_argnames=("perceptual_loss_fn",))
 
     rngs = nnx.Rngs(3)
     per_process = max(num_devices, 2)
@@ -359,14 +339,14 @@ def test_end_to_end_training():
     t0 = time.perf_counter()
     for step in range(5):
         video_np = np.random.randn(per_process, T, H, W, 3).astype(np.float32) * 0.1
-        mask_np = np.ones((per_process, T), dtype=np.float32)
+        mask_np = np.ones((per_process, T), dtype=np.bool_)
 
         video = jax.make_array_from_process_local_data(
             NamedSharding(mesh, P('data', None, None, None, None)), video_np)
         mask = jax.make_array_from_process_local_data(
             NamedSharding(mesh, P('data', None)), mask_np)
 
-        loss, aux = jit_step(model, optimizer, video, mask, hparams, hw,
+        loss, aux = jit_step(model, optimizer, video, mask, hparams,
                              rngs, perceptual_loss_fn, vgg_params)
         losses.append(float(loss))
         if process_index == 0:
@@ -374,20 +354,29 @@ def test_end_to_end_training():
             print(f"  Step {step}: loss={losses[-1]:.6f} "
                   f"MSE={float(aux['MSE']):.6f} time={elapsed:.1f}s")
 
-    check("All losses finite", all(np.isfinite(l) for l in losses))
+    check("All losses finite", all(np.isfinite(l) for l in losses), process_index)
     check("Reconstruction shape correct",
-          aux["reconstruction"].shape == (per_process * 2, T, H, W, 3))
-    log(f"  Final losses: {[f'{l:.4f}' for l in losses]}")
+          aux["reconstruction"].shape == (per_process * 2, T, H, W, 3), process_index)
+    log(f"  Final losses: {[f'{l:.4f}' for l in losses]}", process_index)
 
 
 # ===================================================================
 # TEST 6: Real data end-to-end (minimal)
 # ===================================================================
-def test_real_data_training(data_dir):
-    log("\n=== Test 6: Real Data Training (1 batch, tiny model) ===")
+def test_real_data_training(jax, mesh, replicated_sharding, num_devices, local_devices,
+                            num_processes, process_index, data_dir):
+    import jax.numpy as jnp
+    from jax.sharding import NamedSharding, PartitionSpec as P
+    from flax import nnx
+    import optax
+    from einops import rearrange, repeat
+    from rl_model import VideoVAE
+    from dataloader import create_batched_dataloader
+
+    log("\n=== Test 6: Real Data Training (1 batch, tiny model) ===", process_index)
 
     if not os.path.isdir(data_dir):
-        log(f"  [SKIP] Data directory not found: {data_dir}")
+        log(f"  [SKIP] Data directory not found: {data_dir}", process_index)
         return
 
     H, W = 64, 64
@@ -437,7 +426,7 @@ def test_real_data_training(data_dir):
         resize=(H, W),
         shuffle=True,
         num_workers=2,
-        prefetch_size=2,
+        prefetch_size=4,
         drop_remainder=True,
         seed=99,
     )
@@ -450,45 +439,62 @@ def test_real_data_training(data_dir):
 
         loss = float(jit_step(model, optimizer, video, mask, rngs))
         elapsed = time.perf_counter() - t0
-        log(f"  Real data step {i}: loss={loss:.6f} time={elapsed:.1f}s")
+        log(f"  Real data step {i}: loss={loss:.6f} time={elapsed:.1f}s", process_index)
 
         if i >= 1:
             break
 
-    check("Real data training produced finite loss", np.isfinite(loss))
-    check(f"Processed real video data on {num_devices} devices", True)
+    check("Real data training produced finite loss", np.isfinite(loss), process_index)
+    check(f"Processed real video data on {num_devices} devices", True, process_index)
 
 
 # ===================================================================
 # Main
 # ===================================================================
 if __name__ == "__main__":
+    os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".99"
+
+    import jax
+    jax.distributed.initialize()
+
+    from jax.sharding import NamedSharding, PartitionSpec as P
+
+    num_devices = jax.device_count()
+    local_devices = jax.local_device_count()
+    process_index = jax.process_index()
+    num_processes = jax.process_count()
+
+    mesh = jax.make_mesh((num_devices,), ('data',))
+    replicated_sharding = NamedSharding(mesh, P())
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--quick", action="store_true", help="Quick smoke test")
     parser.add_argument("--data_dir", type=str,
                         default=os.path.expanduser("~/data/videos/videos"))
     args = parser.parse_args()
 
-    log(f"{'='*60}")
-    log(f"Distributed Training Test Suite")
-    log(f"{'='*60}")
-    log(f"JAX version: {jax.__version__}")
-    log(f"Devices: {num_devices} total, {local_devices} local, {num_processes} processes")
-    log(f"Device type: {type(jax.devices()[0])}")
+    log(f"{'='*60}", process_index)
+    log(f"Distributed Training Test Suite", process_index)
+    log(f"{'='*60}", process_index)
+    log(f"JAX version: {jax.__version__}", process_index)
+    log(f"Devices: {num_devices} total, {local_devices} local, {num_processes} processes", process_index)
+    log(f"Device type: {type(jax.devices()[0])}", process_index)
 
     # Always run these
-    test_device_discovery()
-    test_data_sharding()
-    test_gradient_sync()
+    test_device_discovery(jax, num_devices, local_devices, num_processes, process_index)
+    test_data_sharding(jax, mesh, num_devices, process_index)
+    test_gradient_sync(jax, mesh, replicated_sharding, num_devices, process_index)
 
     if not args.quick:
-        test_dataloader_sharding(args.data_dir)
-        test_end_to_end_training()
-        test_real_data_training(args.data_dir)
+        test_dataloader_sharding(jax, mesh, num_devices, local_devices,
+                                 num_processes, process_index, args.data_dir)
+        test_end_to_end_training(jax, mesh, replicated_sharding, num_devices, process_index)
+        test_real_data_training(jax, mesh, replicated_sharding, num_devices, local_devices,
+                                num_processes, process_index, args.data_dir)
 
-    log(f"\n{'='*60}")
+    log(f"\n{'='*60}", process_index)
     if all_passed:
-        log(f"ALL TESTS PASSED on {num_devices} devices")
+        log(f"ALL TESTS PASSED on {num_devices} devices", process_index)
     else:
-        log(f"SOME TESTS FAILED")
-    log(f"{'='*60}")
+        log(f"SOME TESTS FAILED", process_index)
+    log(f"{'='*60}", process_index)
