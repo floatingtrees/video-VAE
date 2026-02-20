@@ -206,6 +206,7 @@ class FactoredAttention(nnx.Module):
                                            dtype=dtype, param_dtype=param_dtype)
         self.TemporalMLP = MLP(in_features, mlp_dim, rngs, dtype=dtype, param_dtype=param_dtype)
 
+    @nnx.remat
     def __call__(self, x: Float[Array, "b time hw channels"], temporal_mask: Float[Array, "b 1 1 time"]):
         b, t, hw, c = x.shape
         temporal_x = rearrange(x, "b t hw c -> (b hw) t c")
