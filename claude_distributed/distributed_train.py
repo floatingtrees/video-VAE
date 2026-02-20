@@ -83,6 +83,7 @@ if __name__ == "__main__":
     from dataloader import create_batched_dataloader, batch_to_video
     from vgg_tests import get_adversarial_perceptual_loss_fn, load_vgg
     import orbax.checkpoint as ocp
+    os.environ.setdefault("WANDB_API_KEY", "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")
     import wandb
 
     # -------------------------------------------------------------------
