@@ -4,8 +4,10 @@ Distributed training for VideoVAE on TPU pods.
 Supports single-host multi-device and multi-host TPU pod configurations.
 Uses JAX SPMD data parallelism: model params replicated, batch sharded across devices.
 
+Designed for v6e-16 (4 workers x 4 chips = 16 devices).
+
 Usage:
-    python distributed_train.py [--run] [--model_path PATH] [--test]
+    python distributed_train.py [--model_path PATH] [--test]
 """
 
 import os
@@ -14,6 +16,8 @@ import time
 import math
 import shutil
 import argparse
+import signal
+import sys
 
 # NOTE: All JAX imports and jax.distributed.initialize() are inside __main__
 # to avoid conflicts with Grain's multiprocessing workers which re-import modules.
@@ -36,7 +40,7 @@ MAGNIFY_NEGATIVES_RATE = 100
 NEGATIVE_PENALTY_TRAINING_STEPS = 2000
 RLLossWeight = 0.01
 max_compression_rate = 2
-DATA_DIR = os.path.expanduser("~/data/videos/videos")
+DATA_DIR = os.path.expanduser("~/data/videos")
 VIDEO_SAVE_DIR = "outputs"
 model_save_path = os.path.expanduser("~/video_vae_distributed_saves/")
 SHUFFLE = True
@@ -44,6 +48,21 @@ NUM_WORKERS = 4
 PREFETCH_SIZE = 16
 DROP_REMAINDER = True
 SEED = 0
+
+
+# ---------------------------------------------------------------------------
+# SIGTERM / SIGINT handling for spot instances
+# ---------------------------------------------------------------------------
+_SHOULD_STOP = False
+
+def _signal_handler(signum, frame):
+    global _SHOULD_STOP
+    sig_name = signal.Signals(signum).name
+    print(f"\n[Worker] Received {sig_name} - will stop after current step and save checkpoint.", flush=True)
+    _SHOULD_STOP = True
+
+signal.signal(signal.SIGTERM, _signal_handler)
+signal.signal(signal.SIGINT, _signal_handler)
 
 
 if __name__ == "__main__":
@@ -85,7 +104,6 @@ if __name__ == "__main__":
     # Parse args
     # -------------------------------------------------------------------
     parser = argparse.ArgumentParser()
-    parser.add_argument("--run", action="store_true", help="Enable wandb logging")
     parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument("--test", action="store_true")
     parser.add_argument("--per_device_batch_size", type=int, default=PER_DEVICE_BATCH_SIZE)
@@ -100,12 +118,7 @@ if __name__ == "__main__":
     DATA_DIR = args.data_dir
     WARMUP_STEPS = int(20000 / math.sqrt(GLOBAL_BATCH_SIZE))
 
-    TRAINING_RUN = args.run
     IS_TEST = args.test
-
-    if TRAINING_RUN and process_index == 0:
-        import wandb
-        wandb.init(project="video-vae-distributed")
 
     # Reset checkpoint directory (process 0 only)
     if process_index == 0:
@@ -118,6 +131,9 @@ if __name__ == "__main__":
         print(f"Per-device batch: {PER_DEVICE_BATCH_SIZE}, "
               f"Local batch: {LOCAL_BATCH_SIZE}, "
               f"Global batch: {GLOBAL_BATCH_SIZE}")
+        print(f"Data dir: {DATA_DIR}")
+        print(f"Num devices: {num_devices}, Num processes: {num_processes}, "
+              f"Local devices: {local_devices}")
 
     # -------------------------------------------------------------------
     # Helpers
@@ -335,6 +351,13 @@ if __name__ == "__main__":
         os.makedirs(os.path.join(VIDEO_SAVE_DIR, "eval"), exist_ok=True)
 
     for epoch in range(NUM_EPOCHS):
+        if _SHOULD_STOP:
+            if process_index == 0:
+                print("SIGTERM received before epoch start, saving and exiting.")
+                save_checkpoint(model, optimizer, f"{model_save_path}/checkpoint_sigterm")
+            jax.experimental.multihost_utils.sync_global_devices("sigterm_save")
+            break
+
         if process_index == 0:
             os.makedirs(os.path.join(VIDEO_SAVE_DIR, f"train/epoch{epoch}"), exist_ok=True)
             os.makedirs(os.path.join(VIDEO_SAVE_DIR, f"eval/epoch{epoch}"), exist_ok=True)
@@ -379,6 +402,14 @@ if __name__ == "__main__":
         steps_per_epoch = total_videos // (effective_batch_size * num_processes)
 
         for i, batch in enumerate(train_dataloader):
+            if _SHOULD_STOP:
+                if process_index == 0:
+                    print(f"SIGTERM received at step {i}, saving checkpoint and exiting.")
+                    save_checkpoint(model, optimizer,
+                                    f"{model_save_path}/checkpoint_sigterm_e{epoch}_s{i}")
+                jax.experimental.multihost_utils.sync_global_devices("sigterm_save_step")
+                break
+
             if i > steps_per_epoch:
                 break
             if i > NEGATIVE_PENALTY_TRAINING_STEPS:
@@ -406,7 +437,8 @@ if __name__ == "__main__":
                       f"density={float(aux['kept_frame_density']):.4f} "
                       f"rl={float(aux['rl_loss']):.4f} "
                       f"MAE={float(aux['per_sample_MAE']):.4f} "
-                      f"time={elapsed:.1f}s")
+                      f"time={elapsed:.1f}s "
+                      f"global_step={global_step}", flush=True)
 
             if process_index == 0 and i % 500 == 499:
                 recon_local = np.array(aux["reconstruction"][:PER_DEVICE_BATCH_SIZE])
@@ -418,22 +450,8 @@ if __name__ == "__main__":
                 batch_to_video(local_batch_np, os.path.join(
                     VIDEO_SAVE_DIR, f"train/epoch{epoch}/video_{i}_original.mp4"), fps=30.0)
 
-            if TRAINING_RUN and process_index == 0:
-                wandb.log({
-                    "train_loss": float(loss),
-                    "train_MSE": float(aux["MSE"]),
-                    "train_perceptual_loss": float(aux["perceptual_loss"]),
-                    "train_Selection Loss": float(aux["selection_loss"]),
-                    "train_KL Loss": float(aux["kl_loss"]),
-                    "train_time": time.perf_counter() - start,
-                    "kept_frame_density": float(aux["kept_frame_density"]),
-                    "mean_trajectory_prob": float(aux["mean_trajectory_prob"]),
-                    "train_rl_loss": float(aux["rl_loss"]),
-                    "train_per_sample_MAE": float(aux["per_sample_MAE"]),
-                    "effective_batch_size": effective_batch_size * num_processes,
-                    "effective_max_frames": effective_max_frames,
-                    "global_step": global_step,
-                })
+        if _SHOULD_STOP:
+            break
 
         # Save checkpoint (process 0 only)
         if process_index == 0:

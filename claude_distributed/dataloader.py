@@ -100,20 +100,27 @@ def batch_to_video(
 def list_video_files(base_dir: str) -> List[str]:
     """
     Collect all video files from videos{i} subdirectories under base_dir.
+    Handles both flat layout (videos{i}/sample.mp4) and nested layout
+    (videos{i}/videos{i}/sample.mp4).
     """
     video_paths = []
-    
+
     # Find all videos{i} directories
     for i in range(0, 100):
         dir_path = os.path.join(base_dir, f"videos{i}")
         if not os.path.isdir(dir_path):
             continue
-        
+
+        # Check for nested layout: videos{i}/videos{i}/
+        nested_path = os.path.join(dir_path, f"videos{i}")
+        if os.path.isdir(nested_path):
+            dir_path = nested_path
+
         # List all video files in this directory
         for filename in os.listdir(dir_path):
             if filename.endswith(('.mp4', '.avi', '.mov', '.mkv', '.webm')):
                 video_paths.append(os.path.join(dir_path, filename))
-    
+
     return video_paths
 
 
