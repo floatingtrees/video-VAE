@@ -409,7 +409,7 @@ if __name__ == "__main__":
         import subprocess
         local_path = os.path.join(LOCAL_TMP_VIDEO_DIR, os.path.basename(gcs_path))
         batch_to_video(batch_data, local_path, fps=fps)
-        subprocess.run(["gsutil", "-q", "cp", local_path, gcs_path], check=True)
+        subprocess.run(["gcloud", "storage", "cp", local_path, gcs_path, "--quiet"], check=True)
         os.remove(local_path)
 
     for epoch in range(NUM_EPOCHS):
