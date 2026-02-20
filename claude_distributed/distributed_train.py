@@ -68,10 +68,13 @@ signal.signal(signal.SIGINT, _signal_handler)
 if __name__ == "__main__":
     os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".99"
 
+    print(f"[{os.uname().nodename}] Starting distributed_train.py...", flush=True)
     import jax
+    print(f"[{os.uname().nodename}] JAX imported, initializing distributed...", flush=True)
     # Initialize distributed JAX BEFORE any device access.
     # On TPU pods this auto-detects coordinator, process id, and peer count.
     jax.distributed.initialize()
+    print(f"[{os.uname().nodename}] Distributed initialized! Process {jax.process_index()}/{jax.process_count()}", flush=True)
 
     import jax.numpy as jnp
     from jax.sharding import NamedSharding, PartitionSpec as P

@@ -314,17 +314,12 @@ def create_dataloader(
     
     data_source = VideoDataSource(base_dir)
     
-    # --- THE MULTI-HOST FIX ---
-    # Automatically scales from 1 CPU process to N TPU Pod processes
+    # Each worker loads all its own local data (no grain sharding).
+    # Data parallelism handled at the JAX level.
     sampler = grain.IndexSampler(
         num_records=len(data_source),
         shuffle=shuffle,
-        seed=seed,
-        shard_options=grain.ShardOptions(
-            shard_index=jax.process_index(),
-            shard_count=jax.process_count(),
-            drop_remainder=True
-        ),
+        seed=seed + jax.process_index(),
     )
     
     transformations = [
@@ -353,20 +348,19 @@ def create_batched_dataloader(
     prefetch_size: int = 16,
     drop_remainder: bool = False,
 ) -> grain.DataLoader:
-    
+
     data_source = VideoDataSource(base_dir)
-    
-    # --- THE MULTI-HOST FIX ---
+
+    # Each worker loads ALL of its own local data (no grain sharding).
+    # Workers already have unique data on their local filesystems.
+    # Data parallelism is handled at the JAX level via
+    # jax.make_array_from_process_local_data which assembles each worker's
+    # local batch into the global sharded array.
+    # No num_epochs limit — the training loop caps iterations via steps_per_epoch.
     sampler = grain.IndexSampler(
         num_records=len(data_source),
         shuffle=shuffle,
-        seed=seed,
-        num_epochs=1,
-        shard_options=grain.ShardOptions(
-            shard_index=jax.process_index(),
-            shard_count=jax.process_count(),
-            drop_remainder=True
-        ),
+        seed=seed + jax.process_index(),  # Different seed per worker for variety
     )
     
     transformations = [
