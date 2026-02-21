@@ -356,14 +356,14 @@ if __name__ == "__main__":
         optax.clip_by_global_norm(1.0),
         optax.adam(learning_rate=schedule_fn),
     )
-    optimizer = nnx.Optimizer(model, optimizer_def)
-
     # -------------------------------------------------------------------
-    # Replicate model + optimizer state across all devices
+    # Replicate model state across all devices, then create optimizer
     # -------------------------------------------------------------------
     gdef, state = nnx.split(model)
     state = jax.device_put(state, replicated_sharding)
     model = nnx.merge(gdef, state)
+
+    optimizer = nnx.Optimizer(model, optimizer_def)
 
     gdef_opt, opt_state = nnx.split(optimizer)
     opt_state = jax.device_put(opt_state, replicated_sharding)
