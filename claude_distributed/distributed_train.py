@@ -365,6 +365,7 @@ if __name__ == "__main__":
     model = nnx.merge(gdef, state)
 
     optimizer = nnx.Optimizer(model, optimizer_def)
+    print(f"OPTIMIZER: {optimizer.model is model}")
 
     hparams = {
         "gamma1": GAMMA1,
