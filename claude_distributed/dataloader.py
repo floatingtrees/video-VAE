@@ -319,7 +319,7 @@ def create_dataloader(
     sampler = grain.IndexSampler(
         num_records=len(data_source),
         shuffle=shuffle,
-        seed=seed + jax.process_index(),
+        seed=seed * 1000 + jax.process_index(),
     )
     
     transformations = [
