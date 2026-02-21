@@ -72,7 +72,7 @@ if __name__ == "__main__":
 
     print(f"[{os.uname().nodename}] Starting distributed_train.py...", flush=True)
     import jax
-    jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
+    #jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
     print(f"[{os.uname().nodename}] JAX imported, initializing distributed...", flush=True)
     # Initialize distributed JAX BEFORE any device access.
     # On TPU pods this auto-detects coordinator, process id, and peer count.
