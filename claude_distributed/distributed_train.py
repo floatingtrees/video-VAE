@@ -464,10 +464,11 @@ if __name__ == "__main__":
         steps_per_epoch = total_videos // (effective_batch_size * num_processes)
 
         for i, batch in enumerate(train_dataloader):
-            if process_index == 0 and i % 50 == 0:
+            if i % 50 == 0:
                 params = nnx.state(model, nnx.Param)
                 param_norm = sum(float(jnp.linalg.norm(x)) for x in jax.tree_util.tree_leaves(params))
-                print(f"  param_norm={param_norm:.4f}")
+                if process_index == 0:
+                    print(f"  param_norm={param_norm:.4f}")
 
 
             if _SHOULD_STOP:
