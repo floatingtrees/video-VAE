@@ -85,7 +85,7 @@ if __name__ == "__main__":
     from einops import rearrange, repeat, reduce
     from jaxtyping import Float, Array
     from rl_model import VideoVAE
-    from dataloader import create_batched_dataloader, batch_to_video
+    from dataloader import create_batched_dataloader, batch_to_video, VideoDataSource
     from vgg_tests import get_adversarial_perceptual_loss_fn, load_vgg
     import orbax.checkpoint as ocp
     os.environ.setdefault("WANDB_API_KEY", "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")
@@ -460,7 +460,7 @@ if __name__ == "__main__":
             seed=SEED + epoch,
         )
 
-        total_videos = 40000  # approximate
+        total_videos = len(VideoDataSource(DATA_DIR))
         steps_per_epoch = total_videos // (effective_batch_size * num_processes)
 
         for i, batch in enumerate(train_dataloader):
