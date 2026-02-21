@@ -18,7 +18,7 @@ import shutil
 import argparse
 import signal
 import sys
-jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
+
 # NOTE: All JAX imports and jax.distributed.initialize() are inside __main__
 # to avoid conflicts with Grain's multiprocessing workers which re-import modules.
 
@@ -72,6 +72,7 @@ if __name__ == "__main__":
 
     print(f"[{os.uname().nodename}] Starting distributed_train.py...", flush=True)
     import jax
+    jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
     print(f"[{os.uname().nodename}] JAX imported, initializing distributed...", flush=True)
     # Initialize distributed JAX BEFORE any device access.
     # On TPU pods this auto-detects coordinator, process id, and peer count.
@@ -364,11 +365,6 @@ if __name__ == "__main__":
     model = nnx.merge(gdef, state)
 
     optimizer = nnx.Optimizer(model, optimizer_def)
-
-    gdef_opt, opt_state = nnx.split(optimizer)
-    opt_state = jax.device_put(opt_state, replicated_sharding)
-    optimizer = nnx.merge(gdef_opt, opt_state)
-    print(f"OPTIMIZER: {optimizer.model is model}")
 
     hparams = {
         "gamma1": GAMMA1,
