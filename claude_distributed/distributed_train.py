@@ -30,7 +30,7 @@ NUM_EPOCHS = 100
 PER_DEVICE_BATCH_SIZE = 1
 MAX_FRAMES = 32
 RESIZE = (256, 256)
-LEARNING_RATE = 2e-5
+LEARNING_RATE = 6e-5
 DECAY_STEPS = 1_000_000
 GAMMA1 = 0.2
 GAMMA2 = 0.001
@@ -368,6 +368,7 @@ if __name__ == "__main__":
     gdef_opt, opt_state = nnx.split(optimizer)
     opt_state = jax.device_put(opt_state, replicated_sharding)
     optimizer = nnx.merge(gdef_opt, opt_state)
+    print(f"OPTIMIZER: {optimizer.model is model}")
 
     hparams = {
         "gamma1": GAMMA1,
@@ -442,6 +443,11 @@ if __name__ == "__main__":
                 ((effective_batch_size + local_devices - 1) // local_devices) * local_devices,
                 local_devices,
             )
+
+        if process_index == 0 and i % 50 == 0:
+            params = nnx.state(model, nnx.Param)
+            param_norm = sum(float(jnp.linalg.norm(x)) for x in jax.tree_util.tree_leaves(params))
+            print(f"  param_norm={param_norm:.4f}")
 
         if process_index == 0:
             print(f"\nEpoch {epoch}: effective_batch={effective_batch_size} "
