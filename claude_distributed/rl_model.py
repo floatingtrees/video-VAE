@@ -53,12 +53,11 @@ class Encoder(nnx.Module):
         for layer in self.layers:
             x = layer(x, mask)
         mean = self.spatial_compression(x)
-        variance = jax.nn.softplus(self.variance_estimator(x)) # Predict softplus^-1(variance) instead of log
-        log_variance = jnp.log(variance)
+        variance = jax.nn.softplus(self.variance_estimator(x))
         selection_intermediate = self.selection_layer1(mean)
         selection_intermediate = rearrange(selection_intermediate, "b t hw 1 -> b t hw")
         selection = jax.nn.sigmoid(self.selection_layer2(selection_intermediate) + 1)
-        return mean, log_variance, selection 
+        return mean, variance, selection
 
 class Decoder(nnx.Module):
     def __init__(self, height, width, channels, patch_size, depth,
@@ -120,13 +119,13 @@ class VideoVAE(nnx.Module):
 
     def __call__(self, x: Float[Array, "b time height width channels"], mask: Float[Array, "b 1 1 time"], rngs: nnx.Rngs, train: bool = True):
         #mask = rearrange(mask, "b 1 1 time -> b time 1 1")
-        mean, log_variance, selection = self.encoder(x, mask, rngs, train=train)
-        # Mean, logvar in shape (b, t, hw, c), selection in shape (b, t, hw, 1)
+        mean, variance, selection = self.encoder(x, mask, rngs, train=train)
+        # Mean, variance in shape (b, t, hw, c), selection in shape (b, t, hw, 1)
 
         if train:
             key = rngs.sampling()
-            noise = jax.random.normal(key, log_variance.shape)
-            std = jnp.exp(log_variance / 2)
+            noise = jax.random.normal(key, variance.shape)
+            std = jnp.sqrt(variance)
             sampled_latent = mean + noise * std
         else:
             # During eval, use deterministic mean
@@ -138,7 +137,7 @@ class VideoVAE(nnx.Module):
         selection = repeat(selection, "b t 1 -> (b 2) t 1 1")
         sampled_latent = repeat(sampled_latent, "b ... -> (b 2) ...")
         mean = repeat(mean, "b ... -> (b 2) ...")
-        log_variance = repeat(log_variance, "b ... -> (b 2) ...")
+        variance = repeat(variance, "b ... -> (b 2) ...")
         mask = repeat(mask, "b ... -> (b 2) ...")
         key = rngs.sampling()
         selection_mask = jax.random.bernoulli(key, p=selection).astype(sampled_latent.dtype)
@@ -146,7 +145,7 @@ class VideoVAE(nnx.Module):
         compressed_representation = self.fill_token * (1 - selection_mask) + sampled_latent * selection_mask
         # selection = 1 means keep, 0 means delete
         reconstruction = self.decoder(compressed_representation, mask, rngs, train=train)
-        return reconstruction, compressed_representation, selection, selection_mask, log_variance, mean
+        return reconstruction, compressed_representation, selection, selection_mask, variance, mean
 
 
 

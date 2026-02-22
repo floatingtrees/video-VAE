@@ -201,7 +201,7 @@ if __name__ == "__main__":
     def loss_fn(model, video, mask, original_mask, rngs,
                 hparams, perceptual_loss_fn, vgg_params, train=True):
 
-        reconstruction, compressed, selection, selection_mask, logvar, mean = \
+        reconstruction, compressed, selection, selection_mask, variance, mean = \
             model(video, mask, rngs, train=train)
         output_mask = repeat(original_mask, "b time -> (b 2) time")
         sequence_lengths = jnp.clip(reduce(output_mask, "b time -> b 1", "sum"), 1.0, None)
@@ -227,7 +227,7 @@ if __name__ == "__main__":
 
         sl_kl = rearrange(sequence_lengths, "b 1 -> b 1 1 1")
         kl_loss = per_sample_mean(
-            0.5 * (jnp.exp(logvar) - 1 - logvar + jnp.square(mean)) * ksm / sl_kl)
+            0.5 * (variance - 1 - jnp.log(variance) + jnp.square(mean)) * ksm / sl_kl)
 
         per_sample_loss = (per_sample_error
                            + hparams["gamma3"] * perceptual_loss
