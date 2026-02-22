@@ -244,9 +244,9 @@ if __name__ == "__main__":
         actions = rearrange(selection_mask, "(b p) time 1 1 -> b p time", p=2)
         selection = rearrange(selection, "(b p) time 1 1 -> b p time", p=2)
         raw_probs = jnp.clip(jnp.abs(selection + actions - 1), 1e-6, 1.0 - 1e-6)
-        probs = raw_probs / jax.lax.stop_gradient(raw_probs)
+
+
         rl_mask = rearrange(output_mask, "(b p) time -> b p time", p=2)
-        probs = jnp.where(rl_mask, probs, 1.0)
 
         # Inverse frequency weighting: balance gradient signal between kept/dropped frames
         rl_mask_f = rl_mask.astype(actions.dtype)
@@ -255,17 +255,18 @@ if __name__ == "__main__":
         num_kept = jnp.clip(num_kept, 1.0)
         num_dropped = jnp.clip(num_dropped, 1.0)
         target_kept = jax.lax.stop_gradient(
-            reduce(rl_mask_f, "b p time -> b p 1", "sum"))
+            reduce(rl_mask_f, "b p time -> b p 1", "sum")) / 2 # 16 for length 32, etc
         frame_weight = jnp.where(actions > 0.5, target_kept / num_kept, target_kept / num_dropped)
         frame_weight = jnp.where(rl_mask, frame_weight, 1.0)
-        probs = probs * jax.lax.stop_gradient(frame_weight)
 
-        raw_probs_masked = jnp.where(rl_mask, raw_probs, 1.0)
-        raw_trajectory_probs = reduce(raw_probs_masked, "b p time -> b p 1", "prod")
 
-        probs = reduce(probs, "b p time -> b p 1", "prod")
         disadvantages = rearrange(disadvantages, "b p -> b p 1")
-        rl_loss = probs * jax.lax.stop_gradient(disadvantages)
+
+        log_probs = jnp.log(raw_probs) - jax.lax.stop_gradient(jnp.log(raw_probs)) 
+        weighted_log_probs = log_probs * jax.lax.stop_gradient(frame_weight)
+        weighted_log_probs = jnp.where(rl_mask, weighted_log_probs, 0.0) 
+        trajectory_score = reduce(weighted_log_probs, "b p time -> b p 1", "sum") 
+        rl_loss = trajectory_score * jax.lax.stop_gradient(disadvantages) 
 
         loss = jnp.mean(per_sample_loss) + jnp.mean(rl_loss) * hparams["rl_loss_weight"]
 
