@@ -248,6 +248,18 @@ if __name__ == "__main__":
         rl_mask = rearrange(output_mask, "(b p) time -> b p time", p=2)
         probs = jnp.where(rl_mask, probs, 1.0)
 
+        # Inverse frequency weighting: balance gradient signal between kept/dropped frames
+        rl_mask_f = rl_mask.astype(actions.dtype)
+        num_kept = jax.lax.stop_gradient(reduce(actions * rl_mask_f, "b p time -> b p 1", "sum"))
+        num_dropped = jax.lax.stop_gradient(reduce((1 - actions) * rl_mask_f, "b p time -> b p 1", "sum"))
+        num_kept = jnp.clip(num_kept, 1.0)
+        num_dropped = jnp.clip(num_dropped, 1.0)
+        target_kept = jax.lax.stop_gradient(
+            reduce(rl_mask_f, "b p time -> b p 1", "sum"))
+        frame_weight = jnp.where(actions > 0.5, target_kept / num_kept, target_kept / num_dropped)
+        frame_weight = jnp.where(rl_mask, frame_weight, 1.0)
+        probs = probs * jax.lax.stop_gradient(frame_weight)
+
         raw_probs_masked = jnp.where(rl_mask, raw_probs, 1.0)
         raw_trajectory_probs = reduce(raw_probs_masked, "b p time -> b p 1", "prod")
 
