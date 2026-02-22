@@ -355,7 +355,7 @@ if __name__ == "__main__":
     )
     optimizer_def = optax.chain(
         optax.clip_by_global_norm(1.0),
-        optax.adam(learning_rate=schedule_fn),
+        optax.adamw(learning_rate=schedule_fn, weight_decay=0.01),
     )
     # -------------------------------------------------------------------
     # Replicate model state across all devices, then create optimizer
