@@ -160,7 +160,7 @@ def load_video(
     path: str, 
     max_frames: Optional[int] = None, 
     resize: Optional[Tuple[int, int]] = None,
-    crop_size: int = 512
+    crop_size: int = 256
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Load a video file and return as numpy array with padding mask.
@@ -274,7 +274,7 @@ class LoadVideoTransform(grain.MapTransform):
     Returns a dict with 'video' and 'mask' keys.
     """
     
-    def __init__(self, max_frames: Optional[int] = None, resize: Optional[Tuple[int, int]] = None, crop_size: int = 512):
+    def __init__(self, max_frames: Optional[int] = None, resize: Optional[Tuple[int, int]] = None, crop_size: int = 256):
         self.max_frames = max_frames
         self.resize = resize
         self.crop_size = crop_size
@@ -305,7 +305,7 @@ def create_dataloader(
     batch_size: int = 1,
     max_frames: Optional[int] = None,
     resize: Optional[Tuple[int, int]] = None,
-    crop_size: int = 512,
+    crop_size: int = 256,
     shuffle: bool = True,
     seed: int = 42,
     num_workers: int = 4,
@@ -341,7 +341,7 @@ def create_batched_dataloader(
     batch_size: int = 1, # NOTE: This is LOCAL batch size per VM
     max_frames: Optional[int] = None,
     resize: Optional[Tuple[int, int]] = None,
-    crop_size: int = 512,
+    crop_size: int = 256,
     shuffle: bool = True,
     seed: int = 42,
     num_workers: int = 4,
