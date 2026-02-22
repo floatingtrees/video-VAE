@@ -222,7 +222,7 @@ if __name__ == "__main__":
         sel_sum = reduce(selection_mask * ksm, "b time 1 1 -> b 1", "sum")
         kept_frame_density = sel_sum / sequence_lengths
         density_diff = kept_frame_density - (1 / hparams["max_compression_rate"])
-        selection_loss = per_sample_mean(jnp.square(
+        selection_loss = per_sample_mean(jnp.abs(
             magnify_negatives(density_diff, hparams["magnify_negatives_rate"])))
 
         sl_kl = rearrange(sequence_lengths, "b 1 -> b 1 1 1")
