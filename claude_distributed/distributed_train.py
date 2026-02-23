@@ -33,7 +33,7 @@ RESIZE = (256, 256)
 LEARNING_RATE = 6e-5
 DECAY_STEPS = 1_000_000
 GAMMA1 = 0.2
-GAMMA2 = 0.1
+GAMMA2 = 0.01
 GAMMA3 = 0.1
 GAMMA4 = 0.05
 MAGNIFY_NEGATIVES_RATE = 100
@@ -225,9 +225,9 @@ if __name__ == "__main__":
         selection_loss = per_sample_mean(jnp.abs(
             magnify_negatives(density_diff, hparams["magnify_negatives_rate"])))
 
-        sl_kl = rearrange(sequence_lengths, "b 1 -> b 1 1 1")
+        sl_kl = rearrange(jnp.clip(sel_sum, 1.0), "b 1 -> b 1 1 1")
         kl_loss = per_sample_mean(
-            0.5 * (variance - 1 - jnp.log(variance) + jnp.square(mean)) * ksm / sl_kl)
+            0.5 * (variance - 1 - jnp.log(variance) + jnp.square(mean)) * ksm * selection_mask / sl_kl)
 
         per_sample_loss = (per_sample_error
                            + hparams["gamma3"] * perceptual_loss
