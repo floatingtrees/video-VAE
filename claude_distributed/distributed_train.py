@@ -395,7 +395,7 @@ if __name__ == "__main__":
     if args.model_path is not None:
         load_checkpoint_fn(model, optimizer, args.model_path)
         hparams["max_compression_rate"] = 100000
-        SEED = 42
+        SEED = hash(args.model_path) % (2**31)
 
     rngs = nnx.Rngs(3)
 
