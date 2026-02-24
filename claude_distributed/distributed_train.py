@@ -32,7 +32,7 @@ MAX_FRAMES = 32
 RESIZE = (256, 256)
 LEARNING_RATE = 6e-5
 DECAY_STEPS = 1_000_000
-GAMMA1 = 0.2
+GAMMA1 = 0.05
 GAMMA2 = 0.01
 GAMMA3 = 0.1
 GAMMA4 = 0.05
@@ -256,7 +256,7 @@ if __name__ == "__main__":
         num_dropped = jnp.clip(num_dropped, 1.0)
         target_kept = jax.lax.stop_gradient(
             reduce(rl_mask_f, "b p time -> b p 1", "sum")) / 2 # 16 for length 32, etc
-        frame_weight = jnp.where(actions > 0.5, target_kept / num_kept, target_kept / num_dropped)
+        frame_weight = jnp.where(actions > 0.5, 1, 1)
 
 
         raw_probs_masked = jnp.where(rl_mask, raw_probs, 1.0)
