@@ -231,7 +231,7 @@ if __name__ == "__main__":
             0.5 * (variance - 1 - jnp.log(variance) + jnp.square(mean)) * ksm * selection_mask / sl_kl)
 
         selection_f32 = selection.astype(jnp.float32)
-        logits = jnp.log(selection_f32 / (1 - selection_f32))
+        logits = jnp.log((selection_f32 + 1e-6) / (1 - selection_f32 + 1e-6))
         logit_penalty = per_sample_mean(jnp.maximum(jnp.abs(logits) - 4.0, 0.0))
 
         per_sample_loss = (per_sample_error
@@ -288,6 +288,7 @@ if __name__ == "__main__":
             "mean_trajectory_prob": jnp.mean(raw_trajectory_probs),
             "rl_loss": jnp.mean(rl_loss),
             "per_sample_MAE": jnp.mean(per_sample_MAE),
+            "logit_penalty": jnp.mean(logit_penalty),
         }
 
     def train_step(model, optimizer, video, mask, hparams,
@@ -534,6 +535,7 @@ if __name__ == "__main__":
                     "mean_trajectory_prob": float(aux["mean_trajectory_prob"]),
                     "rl_loss": float(aux["rl_loss"]),
                     "MAE": float(aux["per_sample_MAE"]),
+                    "logit_penalty": float(aux["logit_penalty"]),
                     "epoch": epoch,
                     "step_in_epoch": i,
                     "global_step": global_step,
@@ -551,6 +553,7 @@ if __name__ == "__main__":
                       f"density={log_dict['kept_frame_density']:.4f} "
                       f"rl={log_dict['rl_loss']:.4f} "
                       f"MAE={log_dict['MAE']:.4f} "
+                      f"logit_pen={log_dict['logit_penalty']:.4f} "
                       f"lr={log_dict['learning_rate']:.2e} "
                       f"time={elapsed:.1f}s "
                       f"global_step={global_step}", flush=True)
