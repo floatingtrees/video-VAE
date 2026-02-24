@@ -39,6 +39,7 @@ GAMMA4 = 0.05
 MAGNIFY_NEGATIVES_RATE = 100
 NEGATIVE_PENALTY_TRAINING_STEPS = 2000
 RLLossWeight = 0.01
+LOGIT_PENALTY_WEIGHT = 1
 max_compression_rate = 2
 DATA_DIR = os.path.expanduser("~/data/videos")
 RUN_TIMESTAMP = int(time.time())
@@ -229,11 +230,16 @@ if __name__ == "__main__":
         kl_loss = per_sample_mean(
             0.5 * (variance - 1 - jnp.log(variance) + jnp.square(mean)) * ksm * selection_mask / sl_kl)
 
+        selection_f32 = selection.astype(jnp.float32)
+        logits = jnp.log(selection_f32 / (1 - selection_f32))
+        logit_penalty = per_sample_mean(jnp.maximum(jnp.abs(logits) - 4.0, 0.0))
+
         per_sample_loss = (per_sample_error
                            + hparams["gamma3"] * perceptual_loss
                            + hparams["gamma1"] * selection_loss
                            + hparams["gamma2"] * kl_loss
-                           + hparams["gamma4"] * per_sample_MAE)
+                           + hparams["gamma4"] * per_sample_MAE
+                           + hparams["logit_penalty_weight"] * logit_penalty)
 
         # RL loss
         pairs = rearrange(per_sample_loss, "(b p) -> b p", p=2)
@@ -390,6 +396,7 @@ if __name__ == "__main__":
         "max_compression_rate": max_compression_rate,
         "magnify_negatives_rate": MAGNIFY_NEGATIVES_RATE,
         "rl_loss_weight": RLLossWeight,
+        "logit_penalty_weight": LOGIT_PENALTY_WEIGHT,
     }
 
     if args.model_path is not None:
