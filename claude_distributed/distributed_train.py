@@ -242,7 +242,7 @@ if __name__ == "__main__":
                            + hparams["logit_penalty_weight"] * logit_penalty)
 
         # RL loss
-        pairs = rearrange(per_sample_loss, "(b p) -> b p", p=2)
+        pairs = rearrange(per_sample_loss.astype(jnp.float32), "(b p) -> b p", p=2)
         means_ = rearrange(per_sample_mean(pairs), "b -> b 1")
         stds_ = rearrange(jnp.std(pairs, axis=1) + 1e-6, "b -> b 1")
         disadvantages = (pairs - means_) / stds_
