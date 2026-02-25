@@ -244,7 +244,8 @@ if __name__ == "__main__":
         # RL loss
         pairs = rearrange(per_sample_loss.astype(jnp.float32), "(b p) -> b p", p=2)
         means_ = rearrange(per_sample_mean(pairs), "b -> b 1")
-        stds_ = rearrange(jnp.std(pairs, axis=1) + 1e-6, "b -> b 1")
+        stds_ = rearrange(jnp.std(pairs) + 1e-6, "1 -> 1 1")
+        stds_ = repeat(stds_, "1 1-> b 1")
         disadvantages = (pairs - means_) / stds_
 
         actions = rearrange(selection_mask, "(b p) time 1 1 -> b p time", p=2)
