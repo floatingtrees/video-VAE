@@ -245,7 +245,7 @@ if __name__ == "__main__":
         pairs = rearrange(per_sample_loss.astype(jnp.float32), "(b p) -> b p", p=2)
         means_ = rearrange(per_sample_mean(pairs), "b -> b 1")
         stds_ = jnp.std(pairs, keepdims=True) + 1e-6
-        stds_ = repeat(stds_, "1 1-> b 1")
+        stds_ = repeat(stds_, "1 1-> b 1", b = pairs.shape[0])
         disadvantages = (pairs - means_) / stds_
 
         actions = rearrange(selection_mask, "(b p) time 1 1 -> b p time", p=2)
