@@ -10,8 +10,8 @@ import zipfile
 
 REPO_ID = "nkp37/OpenVid-1M"
 REPO_TYPE = "dataset"
-DEST_DIR = "/mnt/t9/videos"           # <- change me
-CACHE_DIR="/mnt/t9/tmp"
+DEST_DIR = "/tmp/videos"
+CACHE_DIR = "/tmp/hf_cache"
 
 
 # --- helpers ---------------------------------------------------------------

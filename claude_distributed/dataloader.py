@@ -104,7 +104,7 @@ def list_video_files(base_dir: str) -> List[str]:
     video_paths = []
     
     # Find all videos{i} directories
-    for i in range(0, 100):
+    for i in range(0, 102):
         dir_path = os.path.join(base_dir, f"videos{i}")
         if not os.path.isdir(dir_path):
             continue
