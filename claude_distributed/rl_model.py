@@ -53,7 +53,8 @@ class Encoder(nnx.Module):
         for layer in self.layers:
             x = layer(x, mask)
         mean = self.spatial_compression(x)
-        variance = jax.nn.softplus(self.variance_estimator(x))
+        variance = jax.nn.softplus(self.variance_estimator(x).astype(jnp.float32))
+        variance = (variance + 1e-6).astype(mean.dtype)
         selection_intermediate = self.selection_layer1(mean)
         selection_intermediate = rearrange(selection_intermediate, "b t hw 1 -> b t hw")
         selection = jax.nn.sigmoid(self.selection_layer2(selection_intermediate) + 1)
