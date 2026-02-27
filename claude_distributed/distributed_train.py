@@ -228,7 +228,7 @@ if __name__ == "__main__":
 
         sl_kl = rearrange(jnp.clip(sel_sum, 1.0), "b 1 -> b 1 1 1")
         kl_loss = per_sample_mean(
-            0.5 * (variance - 1 - jnp.log(variance) + jnp.square(mean)) * ksm * selection_mask / sl_kl)
+            0.5 * (variance - 1 - jnp.log(variance + 1e-6) + jnp.square(mean)) * ksm * selection_mask / sl_kl)
 
         selection_f32 = selection.astype(jnp.float32)
         logits = jnp.log((selection_f32 + 1e-6) / (1 - selection_f32 + 1e-6))
