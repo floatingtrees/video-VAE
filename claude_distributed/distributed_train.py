@@ -28,7 +28,7 @@ import sys
 # ---------------------------------------------------------------------------
 NUM_EPOCHS = 100
 PER_DEVICE_BATCH_SIZE = 1
-MAX_FRAMES = 64
+MAX_FRAMES = 32
 RESIZE = (256, 256)
 LEARNING_RATE = 6e-5
 DECAY_STEPS = 1_000_000
