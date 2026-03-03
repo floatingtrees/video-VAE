@@ -48,6 +48,12 @@ def convert_to_indices(binary_mask):
     I_padded = jnp.where(valid, sorted_order, -1)
     return I_padded, dynamic_len
 
+@jax.jit
+def adjacent_difference(x):
+    # prepend=0 acts exactly as your "x[-1] = 0" conceptual condition
+    return jnp.diff(x, prepend=0)
+    
+
 if __name__ == "__main__":
     binary_mask = jnp.array([0, 1, 0, 1, 1])
     I_padded, dynamic_len = convert_to_indices(binary_mask)
@@ -56,3 +62,4 @@ if __name__ == "__main__":
     print(I_padded)
     print(dynamic_len)
     print(x, mask)
+    print(adjacent_difference(x))

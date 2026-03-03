@@ -211,7 +211,7 @@ if __name__ == "__main__":
     attn_mask = jnp.ones((2, 1, 1, temporal_length), dtype=bool)
 
     compressed_representation, selection_indices, compression_mask = VAE.compress(input_image, attn_mask, rngs = nnx.Rngs(0))
-
+    print(compressed_representation.shape)
     reconstruction = VAE.decompress(compressed_representation, attn_mask, selection_indices, compression_mask, rngs = nnx.Rngs(0))
     T_reconstruction, T_compressed_representation, selection, selection_mask, variance, mean = VAE(input_image, attn_mask, nnx.Rngs(0), p=1)
 
