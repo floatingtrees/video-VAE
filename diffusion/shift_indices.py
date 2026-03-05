@@ -63,3 +63,8 @@ if __name__ == "__main__":
     print(dynamic_len)
     print(x, mask)
     print(adjacent_difference(x))
+    adjacent_difference_batched = jax.vmap(adjacent_difference)
+
+    test_tensor = adjacent_difference_batched(jnp.array([[0, 2, 10], [1, 5, 6]]))
+    print(test_tensor)
+    print(jnp.cumsum(test_tensor, axis = 1))

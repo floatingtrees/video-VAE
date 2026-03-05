@@ -10,7 +10,7 @@ from layers import PatchEmbedding, FactoredAttention, GumbelSigmoidSTE, PatchUnE
 from einops import rearrange
 from unet import UNet
 from einops import repeat
-from shift_indices import shift_indices_to_left, convert_to_indices
+from shift_indices import shift_indices_to_left, convert_to_indices, adjacent_difference
 
 class Encoder(nnx.Module):
     def __init__(self, height, width, channels, patch_size, depth,
@@ -165,6 +165,8 @@ class VideoVAE(nnx.Module):
         selection_indices, dynamic_len = batched_convert_to_indices(selection_mask)
         batched_shift = jax.vmap(shift_indices_to_left)                                                                                                              
         compressed, compression_mask = batched_shift(sampled_latent, selection_indices, dynamic_len)
+        batched_adjacent_difference = jax.vmap(adjacent_difference)
+        selection_indices = batched_adjacent_difference(selection_indices) # Turns [1, 2, 6] into [1, 1, 4]
 
         '''
         print(selection_indices.shape, dynamic_len, compressed.shape)
@@ -189,7 +191,7 @@ class VideoVAE(nnx.Module):
             full_mask = jnp.zeros(t, dtype=bool).at[safe_indices].max(mask)
             result = jnp.where(full_mask[:, None, None], result, fill)
             return result
-
+        selection_indices = jnp.cumsum(selection_indices, axis = 1)
         full_representation = jax.vmap(unpack_single)(compressed, selection_indices, compression_mask)
         reconstruction = self.decoder(full_representation, attention_mask, rngs, train=train)
         return reconstruction
@@ -207,11 +209,15 @@ if __name__ == "__main__":
     input_image = jax.random.normal(key, (2, temporal_length, 256, 256, 3)) * 0.02
     VAE = VideoVAE(height=256, width=256, channels=3, patch_size=16,
     encoder_depth=9, decoder_depth=12, mlp_dim=1536, num_heads=8, qkv_features=512,
-    max_temporal_len=temporal_length, spatial_compression_rate=8, unembedding_upsample_rate=4, rngs = nnx.Rngs(0))
+    max_temporal_len=temporal_length, spatial_compression_rate=8, unembedding_upsample_rate=4, rngs = nnx.Rngs(0), 
+    dtype = jnp.bfloat16, param_dtype=jnp.float32)
     attn_mask = jnp.ones((2, 1, 1, temporal_length), dtype=bool)
 
     compressed_representation, selection_indices, compression_mask = VAE.compress(input_image, attn_mask, rngs = nnx.Rngs(0))
     print(compressed_representation.shape)
+    print(selection_indices.shape)
+    print(compression_mask.shape)
+    exit()
     reconstruction = VAE.decompress(compressed_representation, attn_mask, selection_indices, compression_mask, rngs = nnx.Rngs(0))
     T_reconstruction, T_compressed_representation, selection, selection_mask, variance, mean = VAE(input_image, attn_mask, nnx.Rngs(0), p=1)
 
