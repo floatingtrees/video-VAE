@@ -18,11 +18,21 @@ from dataloader import create_batched_dataloader, batch_to_video
 VAE_CHECKPOINT = "/mnt/t9/vae_longterm_saves/gcs2/checkpoint_step_130000"
 DATA_DIR = os.path.join(os.path.dirname(__file__), '..', 'inference', 'test_videos')
 MAX_FRAMES = 32
-BATCH_SIZE = 1
+BATCH_SIZE = 4
 HEIGHT, WIDTH = 256, 256
 NUM_EPOCHS = 500
 NUM_SAMPLE_STEPS = 50
 SAMPLES_DIR = os.path.join(os.path.dirname(__file__), "test_samples")
+DIFFUSION_SAVES_DIR = os.path.join(os.path.dirname(__file__), "diffusion_saves")
+DIT_CHECKPOINT = None
+
+
+def save_checkpoint(model, optimizer, path):
+    state = {"model": nnx.state(model), "optimizer": nnx.state(optimizer)}
+    state = jax.tree.map(lambda x: np.array(x), state)
+    ckptr = ocp.StandardCheckpointer()
+    ckptr.save(path, state)
+    ckptr.wait_until_finished()
 
 
 def load_vae_checkpoint(model, path):
@@ -61,12 +71,12 @@ def main():
     # Small DiT for testing (compressed shape: b, t, hw=256, c=96)
     dit = VideoDiT(
         hw=256,
-        residual_dim=256,
+        residual_dim=512,
         compressed_channel_dim=96,
-        depth=4,
+        depth=8,
         mlp_dim=512,
         num_heads=4,
-        qkv_features=256,
+        qkv_features=512,
         max_temporal_len=64,
         rngs=nnx.Rngs(1),
     )
@@ -74,12 +84,26 @@ def main():
     num_params = sum(x.size for x in jax.tree_util.tree_leaves(params))
     print(f"DiT parameters: {num_params / 1e6:.1f}M")
 
-    optimizer = nnx.Optimizer(dit, optax.adam(1e-4))
+    if DIT_CHECKPOINT is not None:
+        dit_state = {"model": jax.tree.map(ocp.utils.to_shape_dtype_struct, nnx.state(dit))}
+        restored = ocp.StandardCheckpointer().restore(DIT_CHECKPOINT, dit_state)
+        nnx.update(dit, restored["model"])
+        print(f"Loaded DiT checkpoint from {DIT_CHECKPOINT}")
+
+    schedule_fn = optax.warmup_cosine_decay_schedule(
+        init_value=0.0, peak_value=1e-4,
+        warmup_steps=100, decay_steps=10000000000, end_value=1e-5,
+    )
+    optimizer = nnx.Optimizer(dit, optax.chain(
+        optax.clip_by_global_norm(1.0),
+        optax.adam(learning_rate=schedule_fn),
+    ))
     hparams = {"lambda1": 0.1}
     rngs = nnx.Rngs(sampling=42)
 
     # Load videos
     print(f"Loading videos from {DATA_DIR}...")
+    print("CHECKING")
     dataloader = create_batched_dataloader(
         base_dir=DATA_DIR,
         batch_size=BATCH_SIZE,
@@ -93,15 +117,20 @@ def main():
 
     # Preload all batches into memory so we can repeat over them
     batches = []
-    for batch in dataloader:
+    for i, batch in enumerate(dataloader):
         video = jnp.array(batch["video"]).astype(jnp.bfloat16)
         mask = jnp.array(batch["mask"]).astype(jnp.bool_)
         video_mask = rearrange(mask, "b time -> b 1 1 time")
         batches.append((video, video_mask))
+        if i >= 0:
+            break
+
+    print(batches[0][0].shape, batches[0][1].shape)
     print(f"Loaded {len(batches)} batches.")
 
     os.makedirs(SAMPLES_DIR, exist_ok=True)
-
+    os.makedirs(DIFFUSION_SAVES_DIR, exist_ok=True)
+    checkpointer = ocp.StandardCheckpointer()
     # JIT the sample + decode pipeline
     @nnx.jit(static_argnums=(3,))
     def generate(dit, vae, noise, num_steps, compression_mask, selection_indices, video_mask, rngs):
@@ -109,26 +138,40 @@ def main():
         reconstruction = vae.decompress(denoised, video_mask, selection_indices, compression_mask, rngs, train=False)
         return reconstruction
 
-    # Get ground truth masks from first batch for generation
+    # Save ground truth videos (compress + decompress through VAE)
     ref_video, ref_video_mask = batches[0]
     ref_compressed, ref_selection_indices, ref_compression_mask = vae.compress(ref_video, ref_video_mask, rngs)
+    gt_reconstruction = vae.decompress(ref_compressed, ref_video_mask, ref_selection_indices, ref_compression_mask, rngs, train=False)
+    gt_mask_np = np.array(rearrange(ref_video_mask, "b 1 1 t -> b t"))
+    for idx in range(ref_video.shape[0]):
+        gt_batch = {
+            "video": np.array(gt_reconstruction[idx:idx+1]),
+            "mask": gt_mask_np[idx:idx+1],
+        }
+        gt_path = os.path.join(SAMPLES_DIR, f"ground_truth{idx}.mp4")
+        batch_to_video(gt_batch, gt_path, fps=30.0, sample_idx=0)
+        print(f"  Saved ground truth to {gt_path}")
 
     # Train loop
     for epoch in range(NUM_EPOCHS):
         epoch_loss = 0.0
         epoch_mse = 0.0
         epoch_sel = 0.0
-        for i, (video, video_mask) in enumerate(batches):
+        for i in range(1000):
+            video, video_mask = batches[i % len(batches)]
             loss, aux = train_step(dit, vae, optimizer, video, video_mask, hparams, rngs)
             epoch_loss += float(loss)
             epoch_mse += float(aux["MSE"])
             epoch_sel += float(aux["selection_loss"])
             if i > 1000:
                 break
-        n = len(batches)
+        n = i + 1
         print(f"Epoch {epoch:3d} | loss={epoch_loss/n:.6f}  MSE={epoch_mse/n:.6f}  sel_loss={epoch_sel/n:.6f}")
 
-        if epoch % 50 == 0:
+        save_checkpoint(dit, optimizer, os.path.join(DIFFUSION_SAVES_DIR, f"model_{epoch}"))
+        print(f"  Saved DiT checkpoint to {DIFFUSION_SAVES_DIR}/model_{epoch}")
+
+        if epoch % 2 == 0:
             key = rngs.sampling()
             noise = jax.random.normal(key, ref_compressed.shape)
             reconstruction = generate(

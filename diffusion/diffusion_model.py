@@ -48,7 +48,7 @@ class VideoDiT(nnx.Module):
         return latent_prediction, spacing_reduce2
 
 if __name__ == "__main__":
-    jax.config.update("jax_enable_x64", True)
+    #jax.config.update("jax_enable_x64", True)
     seed = 42
     key = jax.random.key(seed)
     try:
