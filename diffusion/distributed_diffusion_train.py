@@ -23,7 +23,7 @@ MAX_FRAMES = 32
 RESIZE = (256, 256)
 LEARNING_RATE = 6e-5
 DECAY_STEPS = 1_000_000
-VAE_PATH = "/mnt/t9/vae_longterm_saves/gcs2/checkpoint_step_130000"
+VAE_PATH = "gs://tpus-487818-checkpoints/run1772595923/perceptual_loss_model/checkpoint_step_290000/"
 SHUFFLE = True
 NUM_WORKERS = 4
 PREFETCH_SIZE = 16
@@ -187,11 +187,7 @@ if __name__ == "__main__":
     print(f"OPTIMIZER: {optimizer_discard.model is VAE}")
 
     load_checkpoint_fn(VAE, optimizer_discard, VAE_PATH)
-    if args.model_path is not None:
-        SEED = (hash(args.model_path)  + process_index * 10912785)% (2**31)
-        rngs = nnx.Rngs(SEED)
-    else:
-        rngs = nnx.Rngs(10)
+
 
     DiT = VideoDiT(hw = 256, residual_dim=1024, compressed_channel_dim = 96, depth=24, mlp_dim = 2048, num_heads = 8, 
     qkv_features = 1024, max_temporal_len = 64, rngs = nnx.Rngs(0)) 
@@ -212,6 +208,13 @@ if __name__ == "__main__":
     DiT = nnx.merge(gdef, state)
     optimizer = nnx.Optimizer(DiT, optimizer_def)
     print(f"OPTIMIZER_DiT: {optimizer.model is DiT}")
+
+    if args.model_path is not None:
+        load_checkpoint_fn(DiT, optimizer, args.model_path)
+        SEED = (hash(args.model_path)  + process_index * 10912785)% (2**31)
+        rngs = nnx.Rngs(SEED)
+    else:
+        rngs = nnx.Rngs(10)
 
     LOCAL_TMP_VIDEO_DIR = "/tmp/video_vae_videos"
     if process_index == 0:
