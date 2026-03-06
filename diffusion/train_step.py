@@ -41,6 +41,9 @@ def loss_fn(DiT, compressed: Float[Array, "b t hw c"], selection_indices: Float[
     selection_loss = jnp.mean(batchwise_selection_loss)
 
     loss = MSE + hparams["lambda1"] * selection_loss
+
+
+    #jax.debug.print("sel_pred: {} sel_target: {} mask: {}", selection_prediction, selection_indices, compression_mask)
     return loss, {"selection_loss": selection_loss, "MSE": MSE}
 
 
@@ -56,9 +59,13 @@ def sample(DiT, noise, compression_mask, num_steps):
     return x, selection_prediction
 
 
-@nnx.jit
-def train_step(DiT, VAE, optimizer, video, video_mask, hparams, rngs):
-    compressed, selection_indices, compression_mask = VAE.compress(video, video_mask, rngs)
+@nnx.jit(static_argnums=(7,))
+def train_step(DiT, VAE, optimizer, video, video_mask, hparams, rngs, deterministic_compress=False):
+    sequence_length = video.shape[1]
+    compressed, selection_indices, compression_mask = VAE.compress(video, video_mask, rngs, train=not deterministic_compress)
+    compressed = compressed[:, :sequence_length // 2, ...]
+    selection_indices = selection_indices[:, :sequence_length// 2]
+    compression_mask = compression_mask[:, :sequence_length // 2]
     grad_fn = nnx.value_and_grad(loss_fn, has_aux=True)
     (loss, aux), grads = grad_fn(DiT, compressed, selection_indices, compression_mask, hparams, rngs)
     optimizer.update(grads)

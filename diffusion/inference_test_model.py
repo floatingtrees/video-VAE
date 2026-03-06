@@ -20,11 +20,11 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), '..', 'inference', 'test_vide
 MAX_FRAMES = 32
 BATCH_SIZE = 1
 HEIGHT, WIDTH = 256, 256
-NUM_EPOCHS = 5000
+NUM_EPOCHS = 500
 NUM_SAMPLE_STEPS = 50
 SAMPLES_DIR = os.path.join(os.path.dirname(__file__), "test_samples")
 DIFFUSION_SAVES_DIR = os.path.join(os.path.dirname(__file__), "diffusion_saves")
-DIT_CHECKPOINT = None# "/home/floatingtrees/projects/video-VAE/diffusion/diffusion_saves/model_10"
+DIT_CHECKPOINT = "/home/floatingtrees/projects/video-VAE/diffusion/diffusion_saves/model_78"
 
 
 def save_checkpoint(model, optimizer, path):
@@ -85,7 +85,7 @@ def main():
     print(f"DiT parameters: {num_params / 1e6:.1f}M")
 
     schedule_fn = optax.warmup_cosine_decay_schedule(
-        init_value=0.0, peak_value=1e-3,
+        init_value=0.0, peak_value=3e-5,
         warmup_steps=100, decay_steps=10000000000, end_value=1e-5,
     )
     optimizer = nnx.Optimizer(dit, optax.chain(
@@ -147,8 +147,6 @@ def main():
         last_frame_pos = jnp.sum(sel_indices * compression_mask, axis=1)  # (b,)
         t = noise.shape[1]
         video_mask = (jnp.arange(t) <= last_frame_pos[:, None])  # (b, t)
-        jax.debug.print("video_mask_bool: {}", video_mask)
-        jax.debug.print("video_mask: {}", sel_pred)
         video_mask = rearrange(video_mask, "b t -> b 1 1 t")
         video_mask = jnp.ones(video_mask.shape, dtype = bool)
         reconstruction = vae.decompress(denoised, video_mask, sel_indices, compression_mask, rngs, train=False)
@@ -156,9 +154,11 @@ def main():
 
     # Save ground truth videos (compress + decompress through VAE)
     ref_video, ref_video_mask = batches[0]
-    ref_compressed, ref_selection_indices, ref_compression_mask = vae.compress(ref_video, ref_video_mask, rngs, train=False)
+    ref_compressed, ref_selection_indices, ref_compression_mask = vae.compress(ref_video, ref_video_mask, rngs)
+    print("MASK", ref_selection_indices)
     gt_reconstruction = vae.decompress(ref_compressed, ref_video_mask, ref_selection_indices, ref_compression_mask, rngs, train=False)
     gt_mask_np = np.array(rearrange(ref_video_mask, "b 1 1 t -> b t"))
+    '''
     for idx in range(ref_video.shape[0]):
         gt_batch = {
             "video": np.array(gt_reconstruction[idx:idx+1]),
@@ -167,15 +167,16 @@ def main():
         gt_path = os.path.join(SAMPLES_DIR, f"ground_truth{idx}.mp4")
         batch_to_video(gt_batch, gt_path, fps=30.0, sample_idx=0)
         print(f"  Saved ground truth to {gt_path}")
-
+    '''
     # Train loop
     for epoch in range(NUM_EPOCHS):
         epoch_loss = 0.0
         epoch_mse = 0.0
         epoch_sel = 0.0
+        '''
         for i in range(1000):
             video, video_mask = batches[i % len(batches)]
-            loss, aux = train_step(dit, vae, optimizer, video, video_mask, hparams, rngs, deterministic_compress=True)
+            loss, aux = train_step(dit, vae, optimizer, video, video_mask, hparams, rngs)
             epoch_loss += float(loss)
             epoch_mse += float(aux["MSE"])
             epoch_sel += float(aux["selection_loss"])
@@ -184,9 +185,9 @@ def main():
         n = i + 1
         print(f"Epoch {epoch:3d} | loss={epoch_loss/n:.6f}  MSE={epoch_mse/n:.6f}  sel_loss={epoch_sel/n:.6f}")
 
-        #save_checkpoint(dit, optimizer, os.path.join(DIFFUSION_SAVES_DIR, f"model_{epoch}"))
+        save_checkpoint(dit, optimizer, os.path.join(DIFFUSION_SAVES_DIR, f"model_{epoch}"))
         #print(f"  Saved DiT checkpoint to {DIFFUSION_SAVES_DIR}/model_{epoch}")
-
+        '''
         if epoch % 2 == 0:
             key = rngs.sampling()
             noise = jax.random.normal(key, ref_compressed.shape)
@@ -198,9 +199,11 @@ def main():
                 "video": np.array(reconstruction),
                 "mask": np.array(rearrange(gen_video_mask, "b 1 1 t -> b t")),
             }
-            out_path = os.path.join(SAMPLES_DIR, f"video{epoch}.mp4")
-            batch_to_video(recon_batch, out_path, fps=30.0, sample_idx=0)
-            print(f"  Saved sample to {out_path}")
+            #out_path = os.path.join(SAMPLES_DIR, f"aa_video{epoch}.mp4")
+            #batch_to_video(recon_batch, out_path, fps=30.0, sample_idx=0)
+            #print(f"  Saved sample to {out_path}")
+            print("FINISHED")
+            exit()
 
     print("Done.")
 

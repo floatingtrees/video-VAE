@@ -2,7 +2,6 @@ import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'inference'))
 
-from diffusion.test_train_step import BATCH_SIZE
 import jax
 import jax.numpy as jnp
 from flax import nnx
@@ -14,11 +13,12 @@ from einops import rearrange
 from autoencoder import VideoVAE
 from diffusion_model import VideoDiT
 from train_step import train_step, sample
-from dataloader import create_batched_dataloader, batch_to_video
-
+from dataloader import create_batched_dataloader, batch_to_video, VideoDataSource
+from einops import rearrange, repeat
+import time
 
 NUM_EPOCHS = 100
-PER_DEVICE_BATCH_SIZE = 1
+PER_DEVICE_BATCH_SIZE = 2
 MAX_FRAMES = 32
 RESIZE = (256, 256)
 LEARNING_RATE = 6e-5
@@ -27,9 +27,37 @@ VAE_PATH = "/mnt/t9/vae_longterm_saves/gcs2/checkpoint_step_130000"
 SHUFFLE = True
 NUM_WORKERS = 4
 PREFETCH_SIZE = 16
+WEIGHT_DECAY = 0.1
+BATCH_SIZE = 2
+SEED = 32
+hparams = {
+    "lambda1": 0.1
+}
+
+@nnx.jit(static_argnums=(3,))
+def generate(dit, vae, noise, num_steps, rngs):
+    compression_mask = repeat(jnp.arange(noise.shape[1]), "t -> b t", b = noise.shape[0])
+    compression_mask = (compression_mask <= 10).astype(jnp.bool)
+    denoised, sel_pred = sample(dit, noise, compression_mask, num_steps)
+    sel_indices = jnp.round(sel_pred).astype(jnp.int32)
+    # First element is absolute index (>= 0), rest are gaps (>= 1)
+    sel_indices = sel_indices.at[:, 0].set(jnp.maximum(sel_indices[:, 0], 0))
+    sel_indices = sel_indices.at[:, 1:].set(jnp.maximum(sel_indices[:, 1:], 1))
+    # Derive video_mask: pretend last kept frame is the last frame
+    last_frame_pos = jnp.sum(sel_indices * compression_mask, axis=1)  # (b,)
+    t = noise.shape[1]
+    video_mask = (jnp.arange(t) <= last_frame_pos[:, None])  # (b, t)
+    video_mask = rearrange(video_mask, "b t -> b 1 1 t")
+    video_mask = jnp.ones(video_mask.shape, dtype = bool)
+    reconstruction = vae.decompress(denoised, video_mask, sel_indices, compression_mask, rngs, train=True)
+    return reconstruction, video_mask
 
 
-
+RUN_TIMESTAMP = int(time.time())
+GCS_RUN_DIR = f"gs://tpus-487818-checkpoints/diffusion_run{RUN_TIMESTAMP}"
+model_save_path = f"{GCS_RUN_DIR}/model"
+VIDEO_SAVE_DIR = f"{GCS_RUN_DIR}/images"
+DATA_DIR = os.path.expanduser("~/data/videos")
 if __name__ == "__main__":
     import argparse
     os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".99"
@@ -160,8 +188,10 @@ if __name__ == "__main__":
 
     load_checkpoint_fn(VAE, optimizer_discard, VAE_PATH)
     if args.model_path is not None:
-        SEED = hash(args.model_path) % (2**31)
-        rngs = nnx.Rngs(3)
+        SEED = (hash(args.model_path)  + process_index * 10912785)% (2**31)
+        rngs = nnx.Rngs(SEED)
+    else:
+        rngs = nnx.Rngs(10)
 
     DiT = VideoDiT(hw = 256, residual_dim=1024, compressed_channel_dim = 96, depth=24, mlp_dim = 2048, num_heads = 8, 
     qkv_features = 1024, max_temporal_len = 64, rngs = nnx.Rngs(0)) 
@@ -174,7 +204,7 @@ if __name__ == "__main__":
     )
     optimizer_def = optax.chain(
         optax.clip_by_global_norm(1.0),
-        optax.adam(learning_rate=schedule_fn),
+        optax.adamw(learning_rate=schedule_fn, weight_decay = WEIGHT_DECAY),
     )
 
     gdef, state = nnx.split(DiT)
@@ -182,15 +212,6 @@ if __name__ == "__main__":
     DiT = nnx.merge(gdef, state)
     optimizer = nnx.Optimizer(DiT, optimizer_def)
     print(f"OPTIMIZER_DiT: {optimizer.model is DiT}")
-
-
-
-    @nnx.jit(static_argnums=(3,))
-    def generate(dit, vae, noise, num_steps, compression_mask, selection_indices, video_mask, rngs):
-        denoised, sel_pred = sample(dit, noise, compression_mask, num_steps)
-        reconstruction = vae.decompress(denoised, video_mask, selection_indices, compression_mask, rngs, train=False)
-        return reconstruction
-
 
     LOCAL_TMP_VIDEO_DIR = "/tmp/video_vae_videos"
     if process_index == 0:
@@ -205,10 +226,20 @@ if __name__ == "__main__":
         subprocess.run(["gcloud", "storage", "cp", local_path, gcs_path, "--quiet"], check=True)
         os.remove(local_path)
 
+    ### Generate reference compressed tensor to adapt to tensor sharding on the fly
+
+    key = rngs.sampling()
+    REF_attn_mask = jnp.ones((2, 1, 1, MAX_FRAMES), dtype=bool)
+    REF_input_image = jax.random.normal(key, (2, MAX_FRAMES, 256, 256, 3)) * 0.02
+    REF_compressed, REF_selection_indices, REF_compression_mask = VAE.compress(REF_input_image, REF_attn_mask, rngs = nnx.Rngs(0))
+
+    ### 
+    
+    start = time.perf_counter()
     for epoch in range(NUM_EPOCHS):
         train_dataloader = create_batched_dataloader(
             base_dir=DATA_DIR,
-            batch_size=BATCH_SIZE,
+            batch_size=LOCAL_BATCH_SIZE,
             max_frames=MAX_FRAMES,
             resize=RESIZE,
             shuffle=SHUFFLE,
@@ -217,3 +248,87 @@ if __name__ == "__main__":
             drop_remainder=True,
             seed=SEED + epoch,
         )
+        total_videos = len(VideoDataSource(DATA_DIR))
+        steps_per_epoch = total_videos // (LOCAL_BATCH_SIZE * num_processes)
+
+        global_step = 0
+        for i, batch in enumerate(train_dataloader):
+            if i % 50 == 0:
+                params = nnx.state(DiT, nnx.Param)
+                param_norm = sum(float(jnp.linalg.norm(x)) for x in jax.tree_util.tree_leaves(params))
+                if process_index == 0:
+                    print(f"  param_norm={param_norm:.4f}")
+
+            if i > steps_per_epoch:
+                break
+            # Shard batch across all devices
+
+            global_batch = shard_batch(batch)
+            video = global_batch["video"].astype(jnp.bfloat16)
+            mask = global_batch["mask"].astype(jnp.bool_)
+            video_mask = rearrange(mask, "b time -> b 1 1 time")
+
+            loss, aux = train_step(DiT, VAE, optimizer, video, video_mask, hparams, rngs = rngs)
+
+            global_step += 1
+
+            if i % 500 == 0:
+                print(f"  [worker {process_index}] heartbeat step={i} global_step={global_step}", flush=True)
+
+            # Logging (process 0 only)
+            if process_index == 0 and i % 50 == 0:
+                elapsed = time.perf_counter() - start
+                log_dict = {
+                    "loss": float(loss),
+                    "MSE": float(aux["MSE"]),
+                    "selection_loss": float(aux["selection_loss"]),
+                    "epoch": epoch,
+                    "step_in_epoch": i,
+                    "global_step": global_step,
+                    "elapsed_time": elapsed,
+                    "learning_rate": float(schedule_fn(global_step)),
+                }
+                wandb.log(log_dict, step=global_step)
+                print(f"  Step {i}: loss={log_dict['loss']:.4f} "
+                      f"MSE={log_dict['MSE']:.4f} "
+                      f"sel={log_dict['selection_loss']:.4f} "
+                      f"lr={log_dict['learning_rate']:.2e} "
+                      f"time={elapsed:.1f}s "
+                      f"global_step={global_step}", flush=True)
+
+            if i % (500) == (499):
+                # All workers materialize arrays to match any implicit collectives
+                # (np.array on sharded JAX arrays can trigger all-gathers)
+                key = rngs.sampling()
+                noise = jax.random.normal(key, REF_compressed.shape)
+                reconstruction, video_mask = generate(DiT, VAE, noise, 100, rngs)
+                recon_local = np.array(reconstruction[:PER_DEVICE_BATCH_SIZE])
+                mask_local = np.array(rearrange(video_mask[:PER_DEVICE_BATCH_SIZE], "b 1 1 t -> b t"))
+                batch_local = {k: np.array(v[:PER_DEVICE_BATCH_SIZE])
+                               for k, v in global_batch.items()}
+
+
+                if process_index == 0:
+                    try:
+                        recon_batch = {"video": recon_local, "mask": mask_local}
+                        save_video_to_gcs(recon_batch,
+                            f"{VIDEO_SAVE_DIR}/video_e{epoch}_s{i}_latent.mp4", fps=30.0)
+                        save_video_to_gcs(batch_local,
+                            f"{VIDEO_SAVE_DIR}/video_e{epoch}_s{i}_original.mp4", fps=30.0)
+                        print(f"  Saved videos at step {i}", flush=True)
+                    except Exception as e:
+                        print(f"  WARNING: Video save failed at step {i}: {e}", flush=True)
+                # Barrier so no worker races ahead during process 0's I/O
+                jax.experimental.multihost_utils.sync_global_devices(f"video_save_e{epoch}_s{i}")
+
+            if global_step % (10000) == 0:
+                save_checkpoint(DiT, optimizer,
+                                f"{model_save_path}/checkpoint_step_{global_step}")
+                if process_index == 0:
+                    print(f"Saved checkpoint at global_step {global_step}", flush=True)
+
+
+        # Save checkpoint (orbax coordinates internally, all processes must call)
+        save_checkpoint(DiT, optimizer, f"{model_save_path}/checkpoint_{epoch}")
+        if process_index == 0:
+            print(f"Saved checkpoint for epoch {epoch}")

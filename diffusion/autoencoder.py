@@ -151,14 +151,16 @@ class VideoVAE(nnx.Module):
 
     def compress(self, x: Float[Array, "b time height width channels"], mask: Float[Array, "b 1 1 time"], rngs: nnx.Rngs, train: bool = True):
         mean, variance, selection_probs = self.encoder(x, mask, rngs, train=train)
-        key = rngs.sampling()
-        noise = jax.random.normal(key, variance.shape)
-        std = jnp.sqrt(variance)
-        sampled_latent = mean + noise * std
-        
-
-        key = rngs.sampling()
-        selection_mask = jax.random.bernoulli(key, p=selection_probs)
+        if train:
+            key = rngs.sampling()
+            noise = jax.random.normal(key, variance.shape)
+            std = jnp.sqrt(variance)
+            sampled_latent = mean + noise * std
+            key = rngs.sampling()
+            selection_mask = jax.random.bernoulli(key, p=selection_probs)
+        else:
+            sampled_latent = mean
+            selection_mask = (selection_probs > 0.5)
         selection_mask = rearrange(selection_mask, "b t 1 -> b t")
 
         batched_convert_to_indices = jax.vmap(convert_to_indices)
