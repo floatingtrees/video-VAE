@@ -51,11 +51,15 @@ def loss_fn(DiT, compressed: Float[Array, "b t hw c"], selection_indices: Float[
 def sample(DiT, noise, compression_mask, num_steps):
     dt = 1.0 / num_steps
     b = noise.shape[0]
-    x = noise
-    for i in range(num_steps):
+    init_sel = jnp.zeros((b, compression_mask.shape[1]))
+
+    def body_fn(i, carry):
+        x, _ = carry
         t = jnp.full((b, 1), i / num_steps)
         velocity, selection_prediction = DiT(x, compression_mask, t)
-        x = x + velocity * dt
+        return (x + velocity * dt, selection_prediction)
+
+    x, selection_prediction = jax.lax.fori_loop(0, num_steps, body_fn, (noise, init_sel))
     return x, selection_prediction
 
 

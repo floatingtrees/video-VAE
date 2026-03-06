@@ -18,7 +18,7 @@ from einops import rearrange, repeat
 import time
 
 NUM_EPOCHS = 100
-PER_DEVICE_BATCH_SIZE = 2
+PER_DEVICE_BATCH_SIZE = 4
 MAX_FRAMES = 32
 RESIZE = (256, 256)
 LEARNING_RATE = 6e-5
@@ -27,7 +27,7 @@ VAE_PATH = "gs://tpus-487818-checkpoints/run1772595923/perceptual_loss_model/che
 SHUFFLE = True
 NUM_WORKERS = 4
 PREFETCH_SIZE = 16
-WEIGHT_DECAY = 0.1
+WEIGHT_DECAY = 0.01
 BATCH_SIZE = 2
 SEED = 32
 hparams = {
@@ -299,7 +299,7 @@ if __name__ == "__main__":
                       f"time={elapsed:.1f}s "
                       f"global_step={global_step}", flush=True)
 
-            if i % (500) == (499):
+            if i % 500 == 0: # Frontload the generate compilation
                 # All workers materialize arrays to match any implicit collectives
                 # (np.array on sharded JAX arrays can trigger all-gathers)
                 key = rngs.sampling()
