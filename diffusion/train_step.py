@@ -57,7 +57,7 @@ def sample(DiT, noise, compression_mask, num_steps):
         x, _ = carry
         t = jnp.full((b, 1), i / num_steps)
         velocity, selection_prediction = DiT(x, compression_mask, t)
-        return (x + velocity * dt, selection_prediction)
+        return (x + velocity.astype(x.dtype) * dt, selection_prediction.astype(x.dtype))
 
     x, selection_prediction = jax.lax.fori_loop(0, num_steps, body_fn, (noise, init_sel))
     return x, selection_prediction
