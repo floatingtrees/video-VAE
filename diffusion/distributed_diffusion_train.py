@@ -188,7 +188,7 @@ if __name__ == "__main__":
     load_checkpoint_fn(VAE, optimizer_discard, VAE_PATH)
 
 
-    DiT = VideoDiT(hw = 256, residual_dim=1024, compressed_channel_dim = 96, depth=24, mlp_dim = 2048, num_heads = 8, 
+    DiT = VideoDiT(hw = 256, residual_dim=1024, compressed_channel_dim = 96, depth=30, mlp_dim = 2048, num_heads = 8, 
     qkv_features = 1024, max_temporal_len = 64, rngs = nnx.Rngs(0)) 
     schedule_fn = optax.warmup_cosine_decay_schedule(
         init_value=0.0,
@@ -275,7 +275,7 @@ if __name__ == "__main__":
 
             global_step += 1
 
-            if i % 500 == 0:
+            if i % 1000 == 0:
                 print(f"  [worker {process_index}] heartbeat step={i} global_step={global_step}", flush=True)
 
             # Logging (process 0 only)
