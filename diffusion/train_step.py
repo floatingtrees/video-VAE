@@ -51,7 +51,7 @@ def loss_fn(DiT, compressed: Float[Array, "b t hw c"], selection_indices: Float[
 def sample(DiT, noise, compression_mask, num_steps):
     dt = 1.0 / num_steps
     b = noise.shape[0]
-    init_sel = jnp.zeros((b, compression_mask.shape[1]))
+    init_sel = jnp.zeros((b, compression_mask.shape[1]), dtype=noise.dtype)
 
     def body_fn(i, carry):
         x, _ = carry
