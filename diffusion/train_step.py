@@ -54,12 +54,12 @@ def sample(DiT, noise, compression_mask, num_steps):
     init_sel = jnp.zeros((b, compression_mask.shape[1]), dtype=noise.dtype)
 
     def body_fn(i, carry):
-        x, _ = carry
+        model, x, _ = carry
         t = jnp.full((b, 1), i / num_steps)
-        velocity, selection_prediction = DiT(x, compression_mask, t)
-        return (x + velocity.astype(x.dtype) * dt, selection_prediction.astype(x.dtype))
+        velocity, selection_prediction = model(x, compression_mask, t)
+        return (model, x + velocity.astype(x.dtype) * dt, selection_prediction.astype(x.dtype))
 
-    x, selection_prediction = nnx.fori_loop(0, num_steps, body_fn, (noise, init_sel))
+    _, x, selection_prediction = nnx.fori_loop(0, num_steps, body_fn, (DiT, noise, init_sel))
     return x, selection_prediction
 
 
