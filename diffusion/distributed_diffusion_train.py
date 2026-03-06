@@ -105,7 +105,7 @@ if __name__ == "__main__":
 
     if process_index == 0:
         wandb.init(
-            project="distributed-video-vae",
+            project="distributed-video-dit",
             config={
             },
         )
