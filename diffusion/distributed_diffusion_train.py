@@ -25,10 +25,9 @@ LEARNING_RATE = 6e-5
 DECAY_STEPS = 1_000_000
 VAE_PATH = "gs://tpus-487818-checkpoints/run1772595923/perceptual_loss_model/checkpoint_step_290000/"
 SHUFFLE = True
-NUM_WORKERS = 4
-PREFETCH_SIZE = 16
+NUM_WORKERS = 16
+PREFETCH_SIZE = 32
 WEIGHT_DECAY = 0.01
-BATCH_SIZE = 2
 SEED = 32
 hparams = {
     "lambda1": 0.1
@@ -239,6 +238,7 @@ if __name__ == "__main__":
     ### 
     
     start = time.perf_counter()
+    global_step = 0
     for epoch in range(NUM_EPOCHS):
         train_dataloader = create_batched_dataloader(
             base_dir=DATA_DIR,
@@ -254,7 +254,7 @@ if __name__ == "__main__":
         total_videos = len(VideoDataSource(DATA_DIR))
         steps_per_epoch = total_videos // (LOCAL_BATCH_SIZE * num_processes)
 
-        global_step = 0
+        
         for i, batch in enumerate(train_dataloader):
             if i % 50 == 0:
                 params = nnx.state(DiT, nnx.Param)
