@@ -102,6 +102,23 @@ if __name__ == "__main__":
     DATA_DIR = args.data_dir
     WARMUP_STEPS = int(20000 / math.sqrt(GLOBAL_BATCH_SIZE))
 
+    
+    GCS_BUCKET = "tpus-487818-training-data"
+    GCS_MOUNT_POINT = os.path.expanduser("~/data")
+    total_videos = len(VideoDataSource(DATA_DIR))
+    train_dataloader = create_batched_dataloader(
+            base_dir=DATA_DIR,
+            batch_size=LOCAL_BATCH_SIZE // REPITITION_CONSTANT,
+            max_frames=MAX_FRAMES,
+            resize=RESIZE,
+            shuffle=SHUFFLE,
+            num_workers=NUM_WORKERS,
+            prefetch_size=PREFETCH_SIZE,
+            drop_remainder=True,
+            seed=SEED,
+            gcs_bucket=GCS_BUCKET,
+            gcs_mount_point=GCS_MOUNT_POINT,
+        )
 
     if process_index == 0:
         wandb.init(
@@ -251,22 +268,7 @@ if __name__ == "__main__":
     
     start = time.perf_counter()
     global_step = 0
-    GCS_BUCKET = "tpus-487818-training-data"
-    GCS_MOUNT_POINT = os.path.expanduser("~/data")
-    total_videos = len(VideoDataSource(DATA_DIR))
-    train_dataloader = create_batched_dataloader(
-            base_dir=DATA_DIR,
-            batch_size=LOCAL_BATCH_SIZE // REPITITION_CONSTANT,
-            max_frames=MAX_FRAMES,
-            resize=RESIZE,
-            shuffle=SHUFFLE,
-            num_workers=NUM_WORKERS,
-            prefetch_size=PREFETCH_SIZE,
-            drop_remainder=True,
-            seed=SEED,
-            gcs_bucket=GCS_BUCKET,
-            gcs_mount_point=GCS_MOUNT_POINT,
-        )
+    
     for epoch in range(NUM_EPOCHS):
         
         
@@ -276,7 +278,7 @@ if __name__ == "__main__":
         for i, batch in enumerate(train_dataloader):
             if i > steps_per_epoch:
                 break
-            
+
             global_step += 1
             if global_step % (10000) == 0:
                 save_checkpoint(DiT, optimizer,
