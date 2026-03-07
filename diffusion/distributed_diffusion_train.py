@@ -124,14 +124,25 @@ if __name__ == "__main__":
             sharded[key] = jax.make_array_from_process_local_data(s, val)
         return sharded
 
-    def save_checkpoint(model, optimizer, path):
+    LOCAL_CHECKPOINT_DIR = "/tmp/checkpoints"
+
+    def save_checkpoint(model, optimizer, gcs_path):
+        import subprocess, shutil
+        local_path = os.path.join(LOCAL_CHECKPOINT_DIR, os.path.basename(gcs_path))
         state = {"model": nnx.state(model), "optimizer": nnx.state(optimizer)}
         # Convert to numpy to bypass orbax's JaxArrayHandler which has a
         # set_mesh context manager bug in orbax 0.11.33 + JAX 0.6.2.
         state = jax.tree.map(lambda x: np.array(x), state)
         ckptr = ocp.StandardCheckpointer()
-        ckptr.save(path, state)
+        ckptr.save(local_path, state)
         ckptr.wait_until_finished()
+        if process_index == 0:
+            subprocess.run(
+                ["gcloud", "storage", "cp", "-r", local_path, gcs_path, "--quiet"],
+                check=True,
+            )
+        shutil.rmtree(local_path, ignore_errors=True)
+        jax.experimental.multihost_utils.sync_global_devices(f"checkpoint_save_{os.path.basename(gcs_path)}")
 
     def load_checkpoint_fn(model, optimizer, path):
         abstract_state = {
@@ -240,8 +251,7 @@ if __name__ == "__main__":
     
     start = time.perf_counter()
     global_step = 0
-    for epoch in range(NUM_EPOCHS):
-        train_dataloader = create_batched_dataloader(
+    train_dataloader = create_batched_dataloader(
             base_dir=DATA_DIR,
             batch_size=LOCAL_BATCH_SIZE // REPITITION_CONSTANT,
             max_frames=MAX_FRAMES,
@@ -250,13 +260,22 @@ if __name__ == "__main__":
             num_workers=NUM_WORKERS,
             prefetch_size=PREFETCH_SIZE,
             drop_remainder=True,
-            seed=SEED + epoch,
+            seed=SEED,
         )
+    for epoch in range(NUM_EPOCHS):
+        
         total_videos = len(VideoDataSource(DATA_DIR))
         steps_per_epoch = total_videos // (LOCAL_BATCH_SIZE // REPITITION_CONSTANT * num_processes)
 
         
         for i, batch in enumerate(train_dataloader):
+            if global_step % (10000) == 0:
+                save_checkpoint(DiT, optimizer,
+                                f"{model_save_path}/checkpoint_step_{global_step}")
+                if process_index == 0:
+                    print(f"Saved checkpoint at global_step {global_step}", flush=True)
+
+            
             if i % 50 == 0:
                 params = nnx.state(DiT, nnx.Param)
                 param_norm = sum(float(jnp.linalg.norm(x)) for x in jax.tree_util.tree_leaves(params))
@@ -327,11 +346,7 @@ if __name__ == "__main__":
                 # Barrier so no worker races ahead during process 0's I/O
                 jax.experimental.multihost_utils.sync_global_devices(f"video_save_e{epoch}_s{i}")
 
-            if global_step % (10000) == 0:
-                save_checkpoint(DiT, optimizer,
-                                f"{model_save_path}/checkpoint_step_{global_step}")
-                if process_index == 0:
-                    print(f"Saved checkpoint at global_step {global_step}", flush=True)
+            
 
 
         # Save checkpoint (orbax coordinates internally, all processes must call)
