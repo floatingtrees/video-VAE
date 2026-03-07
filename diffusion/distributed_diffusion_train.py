@@ -19,6 +19,7 @@ import time
 
 NUM_EPOCHS = 100
 PER_DEVICE_BATCH_SIZE = 4
+REPITITION_CONSTANT = 4
 MAX_FRAMES = 32
 RESIZE = (256, 256)
 LEARNING_RATE = 6e-5
@@ -213,7 +214,7 @@ if __name__ == "__main__":
         SEED = (hash(args.model_path)  + process_index * 10912785)% (2**31)
         rngs = nnx.Rngs(SEED)
     else:
-        rngs = nnx.Rngs(10)
+        rngs = nnx.Rngs(process_index)
 
     LOCAL_TMP_VIDEO_DIR = "/tmp/video_vae_videos"
     if process_index == 0:
@@ -242,7 +243,7 @@ if __name__ == "__main__":
     for epoch in range(NUM_EPOCHS):
         train_dataloader = create_batched_dataloader(
             base_dir=DATA_DIR,
-            batch_size=LOCAL_BATCH_SIZE,
+            batch_size=LOCAL_BATCH_SIZE // REPITITION_CONSTANT,
             max_frames=MAX_FRAMES,
             resize=RESIZE,
             shuffle=SHUFFLE,
@@ -252,7 +253,7 @@ if __name__ == "__main__":
             seed=SEED + epoch,
         )
         total_videos = len(VideoDataSource(DATA_DIR))
-        steps_per_epoch = total_videos // (LOCAL_BATCH_SIZE * num_processes)
+        steps_per_epoch = total_videos // (LOCAL_BATCH_SIZE // REPITITION_CONSTANT * num_processes)
 
         
         for i, batch in enumerate(train_dataloader):
@@ -269,6 +270,8 @@ if __name__ == "__main__":
             global_batch = shard_batch(batch)
             video = global_batch["video"].astype(jnp.bfloat16)
             mask = global_batch["mask"].astype(jnp.bool_)
+            video = repeat(video, "b t h w c -> (b 4) t h w c")
+            video_mask = repeat(video_mask, "b t -> (b 4) t")
             video_mask = rearrange(mask, "b time -> b 1 1 time")
 
             loss, aux = train_step(DiT, VAE, optimizer, video, video_mask, hparams, rngs = rngs)
