@@ -270,8 +270,8 @@ if __name__ == "__main__":
             global_batch = shard_batch(batch)
             video = global_batch["video"].astype(jnp.bfloat16)
             mask = global_batch["mask"].astype(jnp.bool_)
-            video = repeat(video, "b t h w c -> (b 4) t h w c")
-            video_mask = repeat(video_mask, "b t -> (b 4) t")
+            video = repeat(video, "b t h w c -> (b r) t h w c", r=REPITITION_CONSTANT)
+            mask = repeat(mask, "b t -> (b r) t", r=REPITITION_CONSTANT)
             video_mask = rearrange(mask, "b time -> b 1 1 time")
 
             loss, aux = train_step(DiT, VAE, optimizer, video, video_mask, hparams, rngs = rngs)
