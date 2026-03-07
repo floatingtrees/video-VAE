@@ -251,6 +251,7 @@ if __name__ == "__main__":
     
     start = time.perf_counter()
     global_step = 0
+    total_videos = len(VideoDataSource(DATA_DIR))
     train_dataloader = create_batched_dataloader(
             base_dir=DATA_DIR,
             batch_size=LOCAL_BATCH_SIZE // REPITITION_CONSTANT,
@@ -264,7 +265,7 @@ if __name__ == "__main__":
         )
     for epoch in range(NUM_EPOCHS):
         
-        total_videos = len(VideoDataSource(DATA_DIR))
+        
         steps_per_epoch = total_videos // (LOCAL_BATCH_SIZE // REPITITION_CONSTANT * num_processes)
 
         
