@@ -156,29 +156,61 @@ def apply_crop(frame: np.ndarray, crop_size: int, crop_params: Tuple[int, int, i
     return frame[start_h:start_h + crop_size, start_w:start_w + crop_size]
 
 
+_gcs_client = None
+
+def _get_gcs_client():
+    global _gcs_client
+    if _gcs_client is None:
+        from google.cloud import storage
+        _gcs_client = storage.Client()
+    return _gcs_client
+
+
+def _download_from_gcs(path: str, local_path: str, gcs_bucket: str, gcs_mount_point: str):
+    """Download a file directly from GCS, bypassing gcsfuse."""
+    rel = os.path.relpath(path, gcs_mount_point)
+    client = _get_gcs_client()
+    blob = client.bucket(gcs_bucket).blob(rel)
+    blob.download_to_filename(local_path)
+
+
 def load_video(
-    path: str, 
-    max_frames: Optional[int] = None, 
+    path: str,
+    max_frames: Optional[int] = None,
     resize: Optional[Tuple[int, int]] = None,
-    crop_size: int = 256
+    crop_size: int = 256,
+    gcs_bucket: Optional[str] = None,
+    gcs_mount_point: Optional[str] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Load a video file and return as numpy array with padding mask.
-    
+
     Args:
         path: Path to the video file
-        max_frames: Maximum number of frames to load (None for all). 
+        max_frames: Maximum number of frames to load (None for all).
                     If video is shorter, it will be padded with zeros.
         resize: Optional (H, W) to resize frames after random cropping
         crop_size: Size of the random crop (default 512x512)
-    
+        gcs_bucket: If set, download from GCS directly instead of reading through gcsfuse
+        gcs_mount_point: The local gcsfuse mount point (e.g. ~/data)
+
     Returns:
         Tuple of:
             - video: array in shape (T, H, W, C) with values in [0, 1]
             - mask: boolean array in shape (T,) with 1 for real frames, 0 for padded
     """
+    local_tmp = None
     try:
-        cap = cv2.VideoCapture(path)
+        if gcs_bucket and gcs_mount_point:
+            import tempfile
+            fd, local_tmp = tempfile.mkstemp(suffix=os.path.splitext(path)[1])
+            os.close(fd)
+            _download_from_gcs(path, local_tmp, gcs_bucket, gcs_mount_point)
+            video_path = local_tmp
+        else:
+            video_path = path
+
+        cap = cv2.VideoCapture(video_path)
         
         if not cap.isOpened():
             raise ValueError(f"Could not open video: {path}")
@@ -244,10 +276,13 @@ def load_video(
         mask = np.zeros(total_frames, dtype=np.float32)
         mask[:num_real_frames] = 1.0
     except Exception as e:
-        print(e, path) 
+        print(e, path)
         h, w = resize
         video = np.zeros((max_frames, h, w, 3), dtype = np.float32)
         mask = np.ones(max_frames, dtype = np.float32)
+    finally:
+        if local_tmp and os.path.exists(local_tmp):
+            os.remove(local_tmp)
     return video, mask
 
 
@@ -273,15 +308,19 @@ class LoadVideoTransform(grain.MapTransform):
     Grain transform to load and preprocess a video from path.
     Returns a dict with 'video' and 'mask' keys.
     """
-    
-    def __init__(self, max_frames: Optional[int] = None, resize: Optional[Tuple[int, int]] = None, crop_size: int = 256):
+
+    def __init__(self, max_frames: Optional[int] = None, resize: Optional[Tuple[int, int]] = None, crop_size: int = 256,
+                 gcs_bucket: Optional[str] = None, gcs_mount_point: Optional[str] = None):
         self.max_frames = max_frames
         self.resize = resize
         self.crop_size = crop_size
-    
+        self.gcs_bucket = gcs_bucket
+        self.gcs_mount_point = gcs_mount_point
+
     def map(self, path: str) -> Dict[str, np.ndarray]:
         """Load video from path and return as dict with video and mask."""
-        video, mask = load_video(path, self.max_frames, self.resize, self.crop_size)
+        video, mask = load_video(path, self.max_frames, self.resize, self.crop_size,
+                                 gcs_bucket=self.gcs_bucket, gcs_mount_point=self.gcs_mount_point)
         return {"video": video, "mask": mask}
 
 
@@ -347,6 +386,8 @@ def create_batched_dataloader(
     num_workers: int = 4,
     prefetch_size: int = 16,
     drop_remainder: bool = False,
+    gcs_bucket: Optional[str] = None,
+    gcs_mount_point: Optional[str] = None,
 ) -> grain.DataLoader:
 
     data_source = VideoDataSource(base_dir)
@@ -362,12 +403,13 @@ def create_batched_dataloader(
         shuffle=shuffle,
         seed=seed + jax.process_index(),  # Different seed per worker for variety
     )
-    
+
     transformations = [
-        LoadVideoTransform(max_frames=max_frames, resize=resize, crop_size=crop_size),
+        LoadVideoTransform(max_frames=max_frames, resize=resize, crop_size=crop_size,
+                           gcs_bucket=gcs_bucket, gcs_mount_point=gcs_mount_point),
         grain.Batch(batch_size=batch_size, drop_remainder=drop_remainder),
     ]
-    
+
     dataloader = grain.DataLoader(
         data_source=data_source,
         sampler=sampler,

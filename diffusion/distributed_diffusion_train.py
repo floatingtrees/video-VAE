@@ -251,6 +251,8 @@ if __name__ == "__main__":
     
     start = time.perf_counter()
     global_step = 0
+    GCS_BUCKET = "tpus-487818-training-data"
+    GCS_MOUNT_POINT = os.path.expanduser("~/data")
     total_videos = len(VideoDataSource(DATA_DIR))
     train_dataloader = create_batched_dataloader(
             base_dir=DATA_DIR,
@@ -262,6 +264,8 @@ if __name__ == "__main__":
             prefetch_size=PREFETCH_SIZE,
             drop_remainder=True,
             seed=SEED,
+            gcs_bucket=GCS_BUCKET,
+            gcs_mount_point=GCS_MOUNT_POINT,
         )
     for epoch in range(NUM_EPOCHS):
         
