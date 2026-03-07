@@ -270,6 +270,10 @@ if __name__ == "__main__":
 
         
         for i, batch in enumerate(train_dataloader):
+            if i > steps_per_epoch:
+                break
+            
+            global_step += 1
             if global_step % (10000) == 0:
                 save_checkpoint(DiT, optimizer,
                                 f"{model_save_path}/checkpoint_step_{global_step}")
@@ -283,8 +287,7 @@ if __name__ == "__main__":
                 if process_index == 0:
                     print(f"  param_norm={param_norm:.4f}")
 
-            if i > steps_per_epoch:
-                break
+            
             # Shard batch across all devices
 
             global_batch = shard_batch(batch)
@@ -296,7 +299,7 @@ if __name__ == "__main__":
 
             loss, aux = train_step(DiT, VAE, optimizer, video, video_mask, hparams, rngs = rngs)
 
-            global_step += 1
+            
 
             if i % 1000 == 0:
                 print(f"  [worker {process_index}] heartbeat step={i} global_step={global_step}", flush=True)
