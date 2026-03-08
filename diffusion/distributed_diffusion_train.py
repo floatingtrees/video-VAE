@@ -31,7 +31,7 @@ PREFETCH_SIZE = 32
 WEIGHT_DECAY = 0.01
 SEED = 32
 hparams = {
-    "lambda1": 0.1
+    "lambda1": 0.01
 }
 
 @nnx.jit(static_argnums=(3,))
@@ -89,7 +89,7 @@ if __name__ == "__main__":
     data_sharding = NamedSharding(mesh, P('data'))
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str, default=None)
-    parser.add_argument("--test", action="store_true")
+    parser.add_argument("--reset", action="store_true")
     parser.add_argument("--per_device_batch_size", type=int, default=PER_DEVICE_BATCH_SIZE)
     parser.add_argument("--max_frames", type=int, default=MAX_FRAMES)
     parser.add_argument("--data_dir", type=str, default=DATA_DIR)
@@ -244,6 +244,8 @@ if __name__ == "__main__":
     else:
         rngs = nnx.Rngs(process_index)
 
+    if args.reset:
+        optimizer = nnx.Optimizer(DiT, optimizer_def)
     LOCAL_TMP_VIDEO_DIR = "/tmp/video_vae_videos"
     if process_index == 0:
         os.makedirs(LOCAL_TMP_VIDEO_DIR, exist_ok=True)
