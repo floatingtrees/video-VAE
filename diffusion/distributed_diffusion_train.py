@@ -324,7 +324,7 @@ if __name__ == "__main__":
                     "step_in_epoch": i,
                     "global_step": global_step,
                     "elapsed_time": elapsed,
-                    "learning_rate": float(schedule_fn(int(optimizer.step.value))),
+                    "learning_rate": float(schedule_fn(global_step)),
                 }
                 wandb.log(log_dict, step=global_step)
                 print(f"  Step {i}: loss={log_dict['loss']:.4f} "
