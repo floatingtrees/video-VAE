@@ -100,7 +100,7 @@ if __name__ == "__main__":
     GLOBAL_BATCH_SIZE = LOCAL_BATCH_SIZE * num_processes
     MAX_FRAMES = args.max_frames
     DATA_DIR = args.data_dir
-    WARMUP_STEPS = int(20000 / math.sqrt(GLOBAL_BATCH_SIZE))
+    WARMUP_STEPS = int(200000 / math.sqrt(GLOBAL_BATCH_SIZE))
 
     
     GCS_BUCKET = "tpus-487818-training-data"
@@ -246,6 +246,7 @@ if __name__ == "__main__":
 
     if args.reset:
         optimizer = nnx.Optimizer(DiT, optimizer_def)
+        print(f"OPTIMIZER_DiT2: {optimizer.model is DiT}")
     LOCAL_TMP_VIDEO_DIR = "/tmp/video_vae_videos"
     if process_index == 0:
         os.makedirs(LOCAL_TMP_VIDEO_DIR, exist_ok=True)
@@ -323,7 +324,7 @@ if __name__ == "__main__":
                     "step_in_epoch": i,
                     "global_step": global_step,
                     "elapsed_time": elapsed,
-                    "learning_rate": float(schedule_fn(global_step)),
+                    "learning_rate": float(schedule_fn(int(optimizer.step.value))),
                 }
                 wandb.log(log_dict, step=global_step)
                 print(f"  Step {i}: loss={log_dict['loss']:.4f} "
