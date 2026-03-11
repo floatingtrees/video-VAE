@@ -16,6 +16,7 @@ from train_step import train_step, sample
 from dataloader import create_batched_dataloader, batch_to_video, VideoDataSource
 from einops import rearrange, repeat
 import time
+from ema_step import ema_step
 
 NUM_EPOCHS = 100
 PER_DEVICE_BATCH_SIZE = 4
@@ -161,6 +162,38 @@ if __name__ == "__main__":
         shutil.rmtree(local_path, ignore_errors=True)
         jax.experimental.multihost_utils.sync_global_devices(f"checkpoint_save_{os.path.basename(gcs_path)}")
 
+    def save_model(model, gcs_path):
+        import subprocess, shutil
+        local_path = os.path.join(LOCAL_CHECKPOINT_DIR, os.path.basename(gcs_path))
+        state = {"model": nnx.state(model)}
+        state = jax.tree.map(lambda x: np.array(x), state)
+        ckptr = ocp.StandardCheckpointer()
+        ckptr.save(local_path, state)
+        ckptr.wait_until_finished()
+        if process_index == 0:
+            subprocess.run(
+                ["gcloud", "storage", "cp", "-r", local_path, gcs_path, "--quiet"],
+                check=True,
+            )
+        shutil.rmtree(local_path, ignore_errors=True)
+        jax.experimental.multihost_utils.sync_global_devices(f"model_save_{os.path.basename(gcs_path)}")
+
+    def load_model(model, path):
+        abstract_state = {
+            "model": jax.tree.map(ocp.utils.to_shape_dtype_struct, nnx.state(model)),
+        }
+        if process_index == 0:
+            from etils import epath
+            handler = ocp.StandardCheckpointHandler()
+            restored = handler.restore(
+                epath.Path(path),
+                args=ocp.args.StandardRestore(abstract_state),
+            )
+        else:
+            restored = jax.tree.map(lambda x: np.zeros(x.shape, dtype=x.dtype), abstract_state)
+        restored = jax.experimental.multihost_utils.broadcast_one_to_all(restored)
+        nnx.update(model, restored["model"])
+
     def load_checkpoint_fn(model, optimizer, path):
         abstract_state = {
             "model": jax.tree.map(ocp.utils.to_shape_dtype_struct, nnx.state(model)),
@@ -231,6 +264,8 @@ if __name__ == "__main__":
         optax.adamw(learning_rate=schedule_fn, weight_decay = WEIGHT_DECAY),
     )
 
+
+
     gdef, state = nnx.split(DiT)
     state = jax.device_put(state, replicated_sharding)
     DiT = nnx.merge(gdef, state)
@@ -247,9 +282,29 @@ if __name__ == "__main__":
     if args.reset:
         optimizer = nnx.Optimizer(DiT, optimizer_def)
         print(f"OPTIMIZER_DiT2: {optimizer.model is DiT}")
+
+
+    
+    master_weights= VideoDiT(hw = 256, residual_dim=1024, compressed_channel_dim = 96, depth=30, mlp_dim = 2048, num_heads = 8, 
+    qkv_features = 1024, max_temporal_len = 64, rngs = nnx.Rngs(0)) 
+    gdef, state = nnx.split(master_weights)
+    state = jax.device_put(state, replicated_sharding)
+    master_weights = nnx.merge(gdef, state)
+    if args.model_path is not None:
+        try:
+            load_model(master_weights, f"{args.model_path}_master")
+        except Exception as e:
+            print(e)
+            ema_step(master_weights, DiT, 0.0)
+
+    
+
+
     LOCAL_TMP_VIDEO_DIR = "/tmp/video_vae_videos"
     if process_index == 0:
         os.makedirs(LOCAL_TMP_VIDEO_DIR, exist_ok=True)
+
+
 
 
     def save_video_to_gcs(batch_data, gcs_path, fps=30.0):
@@ -286,15 +341,21 @@ if __name__ == "__main__":
             if global_step % (10000) == 0:
                 save_checkpoint(DiT, optimizer,
                                 f"{model_save_path}/checkpoint_step_{global_step}")
+                save_model(master_weights, f"{model_save_path}/checkpoint_step_{global_step}_master")
                 if process_index == 0:
                     print(f"Saved checkpoint at global_step {global_step}", flush=True)
 
             
-            if i % 50 == 0:
+            if i % 100 == 1:
                 params = nnx.state(DiT, nnx.Param)
                 param_norm = sum(float(jnp.linalg.norm(x)) for x in jax.tree_util.tree_leaves(params))
                 if process_index == 0:
                     print(f"  param_norm={param_norm:.4f}")
+
+                params = nnx.state(master_weights, nnx.Param)
+                param_norm = sum(float(jnp.linalg.norm(x)) for x in jax.tree_util.tree_leaves(params))
+                if process_index == 0:
+                    print(f"  master_norm={param_norm:.4f}")
 
             
             # Shard batch across all devices
@@ -307,7 +368,7 @@ if __name__ == "__main__":
             video_mask = rearrange(mask, "b time -> b 1 1 time")
 
             loss, aux = train_step(DiT, VAE, optimizer, video, video_mask, hparams, rngs = rngs)
-
+            ema_step(master_weights, DiT, 0.9999)
             
 
             if i % 1000 == 0:
@@ -339,7 +400,7 @@ if __name__ == "__main__":
                 # (np.array on sharded JAX arrays can trigger all-gathers)
                 key = rngs.sampling()
                 noise = jax.random.normal(key, REF_compressed.shape)
-                reconstruction, video_mask = generate(DiT, VAE, noise, 100, rngs)
+                reconstruction, video_mask = generate(master_weights, VAE, noise, 100, rngs)
                 recon_local = np.array(reconstruction[:PER_DEVICE_BATCH_SIZE])
                 mask_local = np.array(rearrange(video_mask[:PER_DEVICE_BATCH_SIZE], "b 1 1 t -> b t"))
                 batch_local = {k: np.array(v[:PER_DEVICE_BATCH_SIZE])
@@ -363,6 +424,7 @@ if __name__ == "__main__":
 
 
         # Save checkpoint (orbax coordinates internally, all processes must call)
-        save_checkpoint(DiT, optimizer, f"{model_save_path}/checkpoint_{epoch}")
+        save_checkpoint(DiT, optimizer, f"{model_save_path}/checkpoint_step_{epoch}")
+        save_model(master_weights, f"{model_save_path}/checkpoint_step_{epoch}_master")
         if process_index == 0:
             print(f"Saved checkpoint for epoch {epoch}")
