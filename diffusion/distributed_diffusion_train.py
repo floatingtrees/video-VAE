@@ -252,6 +252,13 @@ if __name__ == "__main__":
 
     DiT = VideoDiT(hw = 256, residual_dim=1024, compressed_channel_dim = 96, depth=30, mlp_dim = 2048, num_heads = 8, 
     qkv_features = 1024, max_temporal_len = 64, rngs = nnx.Rngs(0)) 
+
+    params_state = nnx.state(DiT, nnx.Param)
+    num_params = sum(x.size for x in jax.tree_util.tree_leaves(params_state))
+    if process_index == 0:
+        print(f"DiT parameters: {num_params:,}")
+
+
     schedule_fn = optax.warmup_cosine_decay_schedule(
         init_value=0.0,
         peak_value=LEARNING_RATE,
