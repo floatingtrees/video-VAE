@@ -298,10 +298,20 @@ if __name__ == "__main__":
     state = jax.device_put(state, replicated_sharding)
     master_weights = nnx.merge(gdef, state)
     if args.model_path is not None:
-        try:
-            load_model(master_weights, f"{args.model_path}_master")
-        except Exception as e:
-            print(e)
+        master_path = f"{args.model_path}_master"
+        if process_index == 0:
+            from etils import epath
+            master_exists = epath.Path(master_path).exists()
+        else:
+            master_exists = False
+        master_exists = bool(jax.experimental.multihost_utils.broadcast_one_to_all(
+            np.array(master_exists)
+        ))
+        if master_exists:
+            load_model(master_weights, master_path)
+        else:
+            if process_index == 0:
+                print(f"Master checkpoint not found at {master_path}, copying from DiT")
             ema_step(master_weights, DiT, 0.0)
 
     
