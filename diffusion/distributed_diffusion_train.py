@@ -360,7 +360,7 @@ if __name__ == "__main__":
                     print(f"Saved checkpoint at global_step {global_step}", flush=True)
 
             
-            if i % 100 == 1:
+            if i % 200 == 1:
                 params = nnx.state(DiT, nnx.Param)
                 param_norm = sum(float(jnp.linalg.norm(x)) for x in jax.tree_util.tree_leaves(params))
                 if process_index == 0:
