@@ -378,7 +378,8 @@ if __name__ == "__main__":
             video_mask = rearrange(mask, "b time -> b 1 1 time")
 
             loss, aux = train_step(DiT, VAE, optimizer, video, video_mask, hparams, rngs = rngs)
-            ema_step(master_weights, DiT, 0.9999)
+            if i % 10 == 1:
+                ema_step(master_weights, DiT, 0.9999 ** i)
             
 
             if i % 1000 == 0:
