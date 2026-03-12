@@ -307,8 +307,7 @@ if __name__ == "__main__":
                 print(f"Master checkpoint not found at {master_path}, copying from DiT")
             ema_step(master_weights, DiT, 0.0)
 
-    
-
+    cached_ema_step = nnx.cached_partial(ema_step, master_weights, DiT)
 
     LOCAL_TMP_VIDEO_DIR = "/tmp/video_vae_videos"
     if process_index == 0:
@@ -378,8 +377,7 @@ if __name__ == "__main__":
             video_mask = rearrange(mask, "b time -> b 1 1 time")
 
             loss, aux = train_step(DiT, VAE, optimizer, video, video_mask, hparams, rngs = rngs)
-            if i % 10 == 1:
-                ema_step(master_weights, DiT, 0.9999 ** i)
+            cached_ema_step(0.9999)
             
 
             if i % 1000 == 0:
