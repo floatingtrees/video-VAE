@@ -249,7 +249,11 @@ if __name__ == "__main__":
 
     load_checkpoint_fn(VAE, optimizer_discard, VAE_PATH)
     del optimizer_discard
-
+    import gc 
+    gc.collect()
+    if process_index == 0:
+        print("Sleeping after gc")
+    time.sleep(5)
 
     DiT = VideoDiT(hw = 256, residual_dim=1024, compressed_channel_dim = 96, depth=30, mlp_dim = 2048, num_heads = 8, 
     qkv_features = 1024, max_temporal_len = 64, rngs = nnx.Rngs(0)) 
