@@ -248,6 +248,7 @@ if __name__ == "__main__":
     print(f"OPTIMIZER: {optimizer_discard.model is VAE}")
 
     load_checkpoint_fn(VAE, optimizer_discard, VAE_PATH)
+    del optimizer_discard
 
 
     DiT = VideoDiT(hw = 256, residual_dim=1024, compressed_channel_dim = 96, depth=30, mlp_dim = 2048, num_heads = 8, 
@@ -377,7 +378,8 @@ if __name__ == "__main__":
             video_mask = rearrange(mask, "b time -> b 1 1 time")
 
             loss, aux = train_step(DiT, VAE, optimizer, video, video_mask, hparams, rngs = rngs)
-            cached_ema_step(0.9999)
+            if i % 10 == 1:
+                cached_ema_step(0.9999 ** 10)
             
 
             if i % 1000 == 0:
