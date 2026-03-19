@@ -22,8 +22,12 @@ def all_but_first_2_dimension_mean(x):
 
 def loss_fn(DiT, compressed: Float[Array, "b t hw c"], selection_indices: Float[Array, "b t"], compression_mask: Int[Array, "b t"], hparams, rngs):
     key = rngs.sampling()
+    alpha = hparams["noise_alpha"]
     timestep_logits = jax.random.normal(key, compressed.shape[0])
-    timestep = 1/(1 + jnp.exp(timestep_logits))
+    timestep_gaussian = 1/(1 + jnp.exp(timestep_logits))
+    key = rngs.sampling()
+    timestep_uniform = jax.random.uniform(key, compressed.shape[0])
+    timestep = alpha * timestep_uniform + (1-alpha) * timestep_logits
     timestep = rearrange(timestep, "b -> b 1")
     key = rngs.sampling()
     noise = jax.random.normal(key, compressed.shape)

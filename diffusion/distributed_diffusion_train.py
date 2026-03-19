@@ -94,6 +94,7 @@ if __name__ == "__main__":
     parser.add_argument("--per_device_batch_size", type=int, default=PER_DEVICE_BATCH_SIZE)
     parser.add_argument("--max_frames", type=int, default=MAX_FRAMES)
     parser.add_argument("--data_dir", type=str, default=DATA_DIR)
+    parser.add_argument("--switch_to_uniform", action="store_true")
     args = parser.parse_args()
 
     PER_DEVICE_BATCH_SIZE = args.per_device_batch_size
@@ -101,6 +102,10 @@ if __name__ == "__main__":
     GLOBAL_BATCH_SIZE = LOCAL_BATCH_SIZE * num_processes
     MAX_FRAMES = args.max_frames
     DATA_DIR = args.data_dir
+    if args.switch_to_uniform:
+        hparams["noise_alpha"] = 0
+    else:
+        hparams["noise_alpha"] = 1
     WARMUP_STEPS = int(200000 / math.sqrt(GLOBAL_BATCH_SIZE))
 
     
@@ -340,7 +345,6 @@ if __name__ == "__main__":
     
     start = time.perf_counter()
     global_step = 0
-    
     for epoch in range(NUM_EPOCHS):
         
         
@@ -380,7 +384,7 @@ if __name__ == "__main__":
             video = repeat(video, "b t h w c -> (b r) t h w c", r=REPITITION_CONSTANT)
             mask = repeat(mask, "b t -> (b r) t", r=REPITITION_CONSTANT)
             video_mask = rearrange(mask, "b time -> b 1 1 time")
-
+            hparams["noise_alpha"] = min(hparams["noise_alpha"] + 1e-5, 1)
             loss, aux = train_step(DiT, VAE, optimizer, video, video_mask, hparams, rngs = rngs)
             if i % 10 == 1:
                 cached_ema_step(0.9999 ** 10)
