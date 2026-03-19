@@ -27,7 +27,7 @@ def loss_fn(DiT, compressed: Float[Array, "b t hw c"], selection_indices: Float[
     timestep_gaussian = 1/(1 + jnp.exp(timestep_logits))
     key = rngs.sampling()
     timestep_uniform = jax.random.uniform(key, compressed.shape[0])
-    timestep = alpha * timestep_uniform + (1-alpha) * timestep_logits
+    timestep = alpha * timestep_uniform + (1-alpha) * timestep_gaussian
     timestep = rearrange(timestep, "b -> b 1")
     key = rngs.sampling()
     noise = jax.random.normal(key, compressed.shape)
