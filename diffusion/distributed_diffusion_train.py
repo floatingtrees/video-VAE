@@ -103,7 +103,7 @@ if __name__ == "__main__":
     MAX_FRAMES = args.max_frames
     DATA_DIR = args.data_dir
     if args.switch_to_uniform:
-        hparams["noise_alpha"] = 0
+        hparams["noise_alpha"] = 0.9
     else:
         hparams["noise_alpha"] = 1
     WARMUP_STEPS = int(200000 / math.sqrt(GLOBAL_BATCH_SIZE))
