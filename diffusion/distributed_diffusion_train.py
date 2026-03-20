@@ -384,8 +384,7 @@ if __name__ == "__main__":
             video = repeat(video, "b t h w c -> (b r) t h w c", r=REPITITION_CONSTANT)
             mask = repeat(mask, "b t -> (b r) t", r=REPITITION_CONSTANT)
             video_mask = rearrange(mask, "b time -> b 1 1 time")
-            #hparams["noise_alpha"] = min(hparams["noise_alpha"] + 1e-6, 1)
-            hparams["noise_alpha"] = 0 # Increasing it causes loss divergence
+            hparams["noise_alpha"] = min(hparams["noise_alpha"] + 1e-5, 1)
             loss, aux = train_step(DiT, VAE, optimizer, video, video_mask, hparams, rngs = rngs)
             if i % 10 == 1:
                 cached_ema_step(0.9999 ** 10)
