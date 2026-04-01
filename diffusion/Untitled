@@ -1,0 +1,11 @@
+# Find latest checkpoint (newest run with checkpoints, then highest step)
+MODEL_PATH=""
+for RUN_TIME in $(gsutil ls gs://tpus-487818-checkpoints/ | grep 'diffusion_run' | sed 's|.*diffusion_run\([0-9]*\)/.*|\1|' | sort -rn); do
+  STEP=$(gsutil ls "gs://tpus-487818-checkpoints/diffusion_run${RUN_TIME}/model/" 2>/dev/null | grep 'checkpoint_step_' | sed 's|.*checkpoint_step_\([0-9]*\)/.*|\1|' | sort -n | tail -1)
+  if [ -n "$STEP" ]; then
+    MODEL_PATH="gs://tpus-487818-checkpoints/diffusion_run${RUN_TIME}/model/checkpoint_step_${STEP}/"
+    break
+  fi
+done
+
+echo "Using checkpoint: $MODEL_PATH"

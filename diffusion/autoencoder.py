@@ -5,12 +5,12 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 from beartype import beartype
-from jaxtyping import jaxtyped, Float, Array
+from jaxtyping import jaxtyped, Float, Array, Int, Bool
 from layers import PatchEmbedding, FactoredAttention, GumbelSigmoidSTE, PatchUnEmbedding
 from einops import rearrange
 from unet import UNet
 from einops import repeat
-
+from shift_indices import shift_indices_to_left, convert_to_indices, adjacent_difference
 
 class Encoder(nnx.Module):
     def __init__(self, height, width, channels, patch_size, depth,
@@ -118,7 +118,7 @@ class VideoVAE(nnx.Module):
         
 
 
-    def __call__(self, x: Float[Array, "b time height width channels"], mask: Float[Array, "b 1 1 time"], rngs: nnx.Rngs, train: bool = True):
+    def __call__(self, x: Float[Array, "b time height width channels"], mask: Float[Array, "b 1 1 time"], rngs: nnx.Rngs, train: bool = True, p: int = 2):
         #mask = rearrange(mask, "b 1 1 time -> b time 1 1")
         mean, variance, selection = self.encoder(x, mask, rngs, train=train)
         # Mean, variance in shape (b, t, hw, c), selection in shape (b, t, hw, 1)
@@ -135,11 +135,11 @@ class VideoVAE(nnx.Module):
         
 
 
-        selection = repeat(selection, "b t 1 -> (b 2) t 1 1")
-        sampled_latent = repeat(sampled_latent, "b ... -> (b 2) ...")
-        mean = repeat(mean, "b ... -> (b 2) ...")
-        variance = repeat(variance, "b ... -> (b 2) ...")
-        mask = repeat(mask, "b ... -> (b 2) ...")
+        selection = repeat(selection, "b t 1 -> (b p) t 1 1", p = p)
+        sampled_latent = repeat(sampled_latent, "b ... -> (b p) ...", p = p)
+        mean = repeat(mean, "b ... -> (b p) ...", p = p)
+        variance = repeat(variance, "b ... -> (b p) ...", p = p)
+        mask = repeat(mask, "b ... -> (b p) ...", p = p)
         key = rngs.sampling()
         selection_mask = jax.random.bernoulli(key, p=selection).astype(sampled_latent.dtype)
 
@@ -149,6 +149,54 @@ class VideoVAE(nnx.Module):
         return reconstruction, compressed_representation, selection, selection_mask, variance, mean
 
 
+    def compress(self, x: Float[Array, "b time height width channels"], mask: Float[Array, "b 1 1 time"], rngs: nnx.Rngs, train: bool = True):
+        mean, variance, selection_probs = self.encoder(x, mask, rngs, train=train)
+        if train:
+            key = rngs.sampling()
+            noise = jax.random.normal(key, variance.shape)
+            std = jnp.sqrt(variance)
+            sampled_latent = mean + noise * std
+            key = rngs.sampling()
+            selection_mask = jax.random.bernoulli(key, p=selection_probs)
+        else:
+            sampled_latent = mean
+            selection_mask = (selection_probs > 0.5)
+        selection_mask = rearrange(selection_mask, "b t 1 -> b t")
+
+        batched_convert_to_indices = jax.vmap(convert_to_indices)
+        selection_indices, dynamic_len = batched_convert_to_indices(selection_mask)
+        batched_shift = jax.vmap(shift_indices_to_left)                                                                                                              
+        compressed, compression_mask = batched_shift(sampled_latent, selection_indices, dynamic_len)
+        batched_adjacent_difference = jax.vmap(adjacent_difference)
+        selection_indices = batched_adjacent_difference(selection_indices) # Turns [1, 2, 6] into [1, 1, 4]
+
+        '''
+        print(selection_indices.shape, dynamic_len, compressed.shape)
+        print(selection_mask)
+        print("?????")
+        print(selection_indices)
+        print(compression_mask)
+        print(jnp.allclose(compressed[0, 0], sampled_latent[0, 1]))
+        '''
+        return compressed, selection_indices, compression_mask
+
+    def decompress(self, compressed: Float[Array, "b t hw d"], attention_mask: Float[Array, "b 1 1 time"],
+    selection_indices: Int[Array, "b t"], compression_mask: Bool[Array, "b t"], rngs: nnx.Rngs, train: bool = True):
+        b, t, hw, d = compressed.shape
+        fill = rearrange(self.fill_token.value, "1 1 1 d -> 1 1 d")
+
+        def unpack_single(compressed_single, indices, mask):
+            safe_indices = jnp.where(mask, indices, 0)
+            valid_data = jnp.where(mask[:, None, None], compressed_single, 0.0)
+            result = jnp.zeros_like(compressed_single).at[safe_indices].add(valid_data)
+
+            full_mask = jnp.zeros(t, dtype=bool).at[safe_indices].max(mask)
+            result = jnp.where(full_mask[:, None, None], result, fill)
+            return result
+        selection_indices = jnp.cumsum(selection_indices, axis = 1)
+        full_representation = jax.vmap(unpack_single)(compressed, selection_indices, compression_mask)
+        reconstruction = self.decoder(full_representation, attention_mask, rngs, train=train)
+        return reconstruction
 
 
 if __name__ == "__main__":
@@ -159,26 +207,35 @@ if __name__ == "__main__":
         gpu_device = jax.devices('gpu')[0] # 'cuda' works too, but 'gpu' is the generic backend name
     except RuntimeError:
         raise RuntimeError("No GPU found! Is JAX installed with CUDA support?")
-    temporal_length = 128
-    input_image = jax.random.normal(key, (10, temporal_length, 256, 256, 3)) * 0.02
-    encoder = Encoder(height=256, width=256, channels=3, patch_size=16,
-    depth=6, mlp_dim=512, num_heads=8, qkv_features=128,
-    max_temporal_len=temporal_length, spatial_compression_rate=4, rngs = nnx.Rngs(0))
+    temporal_length = 5
+    input_image = jax.random.normal(key, (2, temporal_length, 256, 256, 3)) * 0.02
+    VAE = VideoVAE(height=256, width=256, channels=3, patch_size=16,
+    encoder_depth=9, decoder_depth=12, mlp_dim=1536, num_heads=8, qkv_features=512,
+    max_temporal_len=temporal_length, spatial_compression_rate=8, unembedding_upsample_rate=4, rngs = nnx.Rngs(0), 
+    dtype = jnp.bfloat16, param_dtype=jnp.float32)
+    attn_mask = jnp.ones((2, 1, 1, temporal_length), dtype=bool)
 
+    compressed_representation, selection_indices, compression_mask = VAE.compress(input_image, attn_mask, rngs = nnx.Rngs(0))
+    print(compressed_representation.shape)
+    print(selection_indices.shape)
+    print(compression_mask.shape)
+    exit()
+    reconstruction = VAE.decompress(compressed_representation, attn_mask, selection_indices, compression_mask, rngs = nnx.Rngs(0))
+    T_reconstruction, T_compressed_representation, selection, selection_mask, variance, mean = VAE(input_image, attn_mask, nnx.Rngs(0), p=1)
 
+    
+    print(jnp.max(jnp.abs(T_reconstruction - reconstruction)))
 
-    jit_forward = nnx.jit(encoder.__call__)
+    # Test with jit
+    jit_compress = nnx.jit(VAE.compress)
+    jit_decompress = nnx.jit(VAE.decompress)
+    jit_forward = nnx.jit(VAE.__call__, static_argnames=("p",))
 
-    import time
-    start = time.perf_counter()
-    output = jit_forward(input_image)
-    print(time.perf_counter() - start)
-    for i in range(100):
-        output = jit_forward(input_image)
-    print(time.perf_counter() - start)
-    params = nnx.state(encoder, nnx.Param)
+    compressed_jit, indices_jit, mask_jit = jit_compress(input_image, attn_mask, rngs=nnx.Rngs(0))
+    reconstruction_jit = jit_decompress(compressed_jit, attn_mask, indices_jit, mask_jit, rngs=nnx.Rngs(0))
+    #T_reconstruction_jit, T_compressed_jit, selection_jit, selection_mask_jit, variance_jit, mean_jit = jit_forward(input_image, attn_mask, nnx.Rngs(0), p=1)
 
-    # 2. Count using standard JAX utilities
-    num_params = sum(x.size for x in jax.tree_util.tree_leaves(params))
-
-    print(f"Trainable Parameters: {num_params / 10**6} Million")
+    print("jit compress vs eager compress:", jnp.max(jnp.abs(compressed_jit - compressed_representation)))
+    print("jit decompress vs eager decompress:", jnp.max(jnp.abs(reconstruction_jit - reconstruction)))
+    #print("jit forward vs eager forward:", jnp.max(jnp.abs(T_reconstruction_jit - T_reconstruction)))
+    #print("jit compress->decompress vs jit forward:", jnp.max(jnp.abs(T_reconstruction_jit - reconstruction_jit)))
